@@ -1,0 +1,87 @@
+# LeadFlow
+
+MVP backend for collecting company leads from Yandex Maps and 2GIS, normalizing
+them into `CompanyLead`, and preventing duplicate companies in PostgreSQL.
+
+Implemented:
+
+- FastAPI endpoints for companies, parser jobs, runs, editable campaigns/templates,
+  mailboxes, integrations, and dashboard data;
+- Yandex Maps adapter over the pinned `dmikhaylov/yamaps_parser` revision;
+- 2GIS adapter over the pinned LGPL `Eroloft/parser-2gis-new` revision;
+- database-backed deduplication by source ID, website domain, phone, INN, and
+  normalized company name plus address;
+- exact `limit_new` handling: duplicates do not consume the requested limit;
+- parser run status/checkpoint records and cron worker;
+- PostgreSQL migration and Docker Compose stack;
+- encrypted SMTP/IMAP and AI/Google credentials, automatic and LLM-personalized sending;
+- open/click/reply/bounce/unsubscribe tracking and suppression;
+- Google Sheets export, replaceable phrase-search provider, and a compact admin UI.
+
+HTML templates support `company_name`, `city`, `category`, `website`, and (for
+manual AI sends) `personalized_text`. Passwords and API keys are never returned
+by API schemas. Set a strong `SECRET_KEY` before storing any credentials; changing
+it later makes existing encrypted values unreadable.
+
+## Start
+
+Copy `.env.example` to `.env`, then run:
+
+```bash
+docker compose up -d --build
+```
+
+Open API documentation at <http://localhost:8000/docs>.
+
+After the initial image build, the regular start command is:
+
+```bash
+docker compose up -d
+```
+
+Set unique `SECRET_KEY` and `ADMIN_PASSWORD` values before exposing the service.
+Tracking and unsubscribe URLs use `PUBLIC_BASE_URL`, so it must be externally
+reachable by recipients. Schedules use five-field cron expressions in UTC.
+
+Create a parser job:
+
+```bash
+curl -X POST http://localhost:8000/api/parser-jobs \
+  -H "Content-Type: application/json" \
+  -d '{"source":"yandex_maps","category":"храмы","city":"Москва","limit_new":10}'
+```
+
+Start it with `POST /api/parser-jobs/{id}/run`, or provide `schedule`, for
+example `0 7 * * 1-5`. Source-specific options include:
+
+- both sources: `max_scan`, `enrich_emails`;
+- Yandex: `use_grid`, `upstream_email_enrichment`;
+- 2GIS: `delay_ms`, `timeout_seconds`, `chrome_binary`.
+
+`limit_new` counts only rows inserted after all database duplicate checks. A
+CAPTCHA stops the run as `blocked`; LeadFlow does not attempt to solve or bypass
+it. Increase delays or retry later.
+
+Run it using the returned job ID:
+
+```bash
+curl -X POST http://localhost:8000/api/parser-jobs/JOB_ID/run
+```
+
+## Operational behavior
+
+The source adapter may inspect more records than `limit_new`. LeadFlow stops
+only after the requested number of previously unseen companies has been
+committed. If the configured `max_scan` is reached first, the run is marked
+`exhausted`. CAPTCHA detection stops the run with `blocked`; LeadFlow does not
+attempt to bypass it.
+
+Email discovery reads only public HTML pages from the company domain and records
+the exact page, method, and confidence. JavaScript and asset files are not
+treated as contact sources. Google Sheets is a manager-facing interface; on sync,
+manager-edited direction, email, contact person, and block status are imported
+before the database state is exported.
+
+Mail-account connection tests validate both SMTP and IMAP authentication. Both
+automatic campaigns and one-off personalized sends enforce mailbox daily limits,
+suppression, manual blocking, and the global no-repeat rule.

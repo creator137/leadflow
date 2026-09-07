@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leadflow"
+version = "0.1.0"
+description = "Company lead collection and outreach automation"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic>=1.14,<2",
+  "apscheduler>=3.10,<4",
+  "beautifulsoup4>=4.12,<5",
+  "cryptography>=44,<47",
+  "fastapi>=0.115,<1",
+  "google-auth>=2.38,<3",
+  "gspread>=6.1,<7",
+  "httpx>=0.28,<1",
+  "jinja2>=3.1,<4",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic-settings>=2.7,<3",
+  "python-multipart>=0.0.20,<1",
+  "sqlalchemy>=2.0.36,<3",
+  "uvicorn[standard]>=0.34,<1",
+  "yamaps-parser @ git+https://github.com/dmikhaylov/yamaps_parser.git@5669da6d796f4546c5fb8c4725f8965a4c54c763",
+  "parser-2gis-new @ git+https://github.com/Eroloft/parser-2gis-new.git@a773258a12d70f6523beaba8d7d63f2dfccecfdb",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<9"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["static/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

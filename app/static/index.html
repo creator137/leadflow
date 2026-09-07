@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LeadFlow</title>
+  <style>
+    :root{font-family:Inter,system-ui,sans-serif;color:#17212b;background:#f4f7fb}*{box-sizing:border-box}
+    body{margin:0;display:grid;grid-template-columns:230px 1fr;min-height:100vh}aside{background:#102a43;color:white;padding:28px 18px}
+    aside h1{margin:0 0 28px;font-size:24px}.nav{display:grid;gap:6px}.nav button{border:0;background:transparent;color:#bdd2e6;text-align:left;padding:10px 12px;border-radius:7px;cursor:pointer}.nav button:hover,.nav button.active{background:#1e4669;color:white}
+    main{padding:30px;max-width:1500px;width:100%}h2{margin-top:0}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin:20px 0}.card,.panel{background:white;border:1px solid #dce6ef;border-radius:10px;padding:18px;box-shadow:0 2px 8px #17324d0d}.number{font-size:30px;font-weight:700;margin-top:6px}.muted{color:#627d98;font-size:13px}table{width:100%;border-collapse:collapse;background:white}th,td{text-align:left;padding:11px;border-bottom:1px solid #e8eef4;font-size:14px}th{color:#526d82}button.primary{background:#147d64;color:white;border:0;border-radius:7px;padding:10px 15px;cursor:pointer}.empty{padding:35px;text-align:center;color:#829ab1}.error{color:#b42318}.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}@media(max-width:760px){body{grid-template-columns:1fr}aside{display:none}main{padding:18px}}
+  </style>
+</head>
+<body>
+<aside><h1>LeadFlow</h1><div class="nav" id="nav"></div></aside>
+<main><div class="top"><div><h2 id="title">Dashboard</h2><div class="muted" id="subtitle">Сбор компаний и email-кампании</div></div><div><button id="action" class="primary" onclick="action()">Добавить</button> <button class="primary" onclick="load()">Обновить</button></div></div><div id="content"></div></main>
+<script>
+const sections={
+  Dashboard:['/api/dashboard','Сводные показатели'],Companies:['/api/companies','Компании'],Parsers:['/api/parser-jobs','Источники и расписания'],
+  'Phrase Search':['/api/phrase-search','Поиск по фразам'],'Mail Accounts':['/api/mail-accounts','SMTP / IMAP'],Templates:['/api/templates','HTML-шаблоны'],
+  Campaigns:['/api/campaigns','Автоматические рассылки'],'Google Sheets':['/api/google-sheets','Синхронизация'], 'AI Settings':['/api/ai-settings','Персонализация'],
+  'System Settings':['/api/system-settings','Настройки окружения; полная схема доступна в /docs'], Logs:['/api/parser-runs','Запуски парсеров']};
+let current='Dashboard';const nav=document.getElementById('nav');
+Object.keys(sections).forEach(name=>{let b=document.createElement('button');b.textContent=name;b.onclick=()=>{current=name;load()};nav.appendChild(b)});
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function load(){document.getElementById('title').textContent=current;document.getElementById('subtitle').textContent=sections[current][1];[...nav.children].forEach(b=>b.classList.toggle('active',b.textContent===current));let box=document.getElementById('content');box.innerHTML='<div class="panel">Загрузка…</div>';try{let r=await fetch(sections[current][0]);if(!r.ok)throw Error(await r.text());let data=await r.json();render(data)}catch(e){box.innerHTML='<div class="panel error">'+esc(e.message)+'</div>'}}
+async function post(url,data){let r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!r.ok)throw Error(await r.text());await load()}
+function required(label,initial=''){let value=prompt(label,initial);if(value===null||!value.trim())throw Error('Отменено');return value.trim()}
+async function action(){try{
+  if(current==='Parsers')return await post('/api/parser-jobs',{source:required('Источник: yandex_maps или two_gis','yandex_maps'),category:required('Категория'),city:required('Город','Москва'),limit_new:Number(required('Количество новых компаний','50')),schedule:prompt('Cron UTC (можно оставить пустым)','')||null,active:true,keywords:[],options:{}});
+  if(current==='Phrase Search')return await post('/api/phrase-search',{phrase:required('Поисковая фраза'),limit:Number(required('Лимит результатов','20'))});
+  if(current==='Templates')return await post('/api/templates',{name:required('Название шаблона'),category:prompt('Категория','')||null,subject_template:required('Тема','Предложение для {{ company_name }}'),html_template:required('HTML','<p>Здравствуйте, {{ company_name }}!</p>'),active:true});
+  if(current==='Mail Accounts')return await post('/api/mail-accounts',{name:required('Название'),from_email:required('Email отправителя'),from_name:prompt('Имя отправителя','')||null,smtp_host:required('SMTP host'),smtp_port:Number(required('SMTP port','587')),smtp_login:required('SMTP login'),smtp_password:required('SMTP password'),smtp_security:required('SMTP security: starttls, ssl или none','starttls'),imap_host:required('IMAP host'),imap_port:Number(required('IMAP port','993')),imap_login:required('IMAP login'),imap_password:required('IMAP password'),daily_limit:Number(required('Лимит в сутки','100')),active:true});
+  if(current==='Campaigns')return await post('/api/campaigns',{name:required('Название кампании'),category:prompt('Категория (пусто = все)','')||null,city:prompt('Город (пусто = все)','')||null,mailbox_id:required('ID почтового аккаунта'),template_id:required('ID шаблона'),schedule:prompt('Cron UTC','')||null,daily_limit:Number(required('Лимит в сутки','50')),run_limit:Number(required('Лимит за запуск','20')),active:false});
+  if(current==='Google Sheets'){let credentials=JSON.parse(required('Service Account JSON'));return await post('/api/google-sheets',{spreadsheet_id:required('Spreadsheet ID'),worksheet_name:required('Название листа','Companies'),service_account_json:credentials,active:true})}
+  if(current==='AI Settings')return await post('/api/ai-settings',{api_base:required('API base','https://api.openai.com/v1'),api_key:required('API key'),model:required('Модель'),prompt_template:required('Prompt с переменными {company_name}, {website_content}'),active:true});
+  if(current==='System Settings'){location.href='/docs';return}
+  alert('Для этой страницы операции доступны в карточках и API /docs');
+ }catch(e){if(e.message!=='Отменено')alert(e.message)}}
+function render(data){let box=document.getElementById('content');if(!Array.isArray(data)){box.innerHTML='<div class="cards">'+Object.entries(data).map(([k,v])=>`<div class="card"><div class="muted">${esc(k.replaceAll('_',' '))}</div><div class="number">${esc(v)}</div></div>`).join('')+'</div>';return}if(!data.length){box.innerHTML='<div class="panel empty">Пока нет записей. Используйте API-документацию по адресу <a href="/docs">/docs</a>.</div>';return}let keys=Object.keys(data[0]).filter(k=>!['raw_data','html_template','prompt_template'].includes(k)).slice(0,9);box.innerHTML=`<div class="panel" style="overflow:auto"><table><thead><tr>${keys.map(k=>`<th>${esc(k)}</th>`).join('')}</tr></thead><tbody>${data.map(row=>`<tr>${keys.map(k=>`<td>${esc(typeof row[k]==='object'?JSON.stringify(row[k]):row[k])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`}
+load();
+</script>
+</body></html>
