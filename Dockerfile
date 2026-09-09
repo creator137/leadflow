@@ -11,11 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       chromium git ca-certificates fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
+RUN printf 'precedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
+
 COPY pyproject.toml requirements.txt README.md THIRD_PARTY_NOTICES.md ./
-COPY app ./app
+COPY app/__init__.py ./app/__init__.py
 RUN python -m pip install --no-cache-dir -r requirements.txt \
     && python -m playwright install chromium
 
+COPY app ./app
 COPY alembic.ini ./
 COPY migrations ./migrations
 

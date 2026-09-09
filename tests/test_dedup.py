@@ -33,3 +33,22 @@ def test_deduplicates_by_phone_and_domain() -> None:
         assert result.inserted is False
         assert result.matched_by in {"phone", "website_domain"}
 
+
+def test_duplicate_merges_discovered_email() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        original = CompanyLead(
+            source="two_gis", source_external_id="email-1", source_url="https://2gis/1",
+            company_name="Храм", website="https://example.org",
+        )
+        enriched = CompanyLead(
+            source="two_gis", source_external_id="email-1", source_url="https://2gis/1",
+            company_name="Храм", website="https://example.org", email="info@example.org",
+            raw_data={"email_discovery": [{"email": "info@example.org", "page_url": "https://example.org/contacts"}]},
+        )
+        company = upsert_lead(session, original).company
+        result = upsert_lead(session, enriched)
+        assert result.inserted is False
+        assert company.email == "info@example.org"
+        assert company.raw_data["email_discovery"][0]["page_url"].endswith("/contacts")

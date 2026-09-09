@@ -30,8 +30,20 @@ def execute_job(session: Session, job: SourceJob, settings: Settings, run: Parse
     run.status = "running"
     session.commit()
 
+    resume_external_id = (run.checkpoint or {}).get("last_external_id")
+    resume_source_url = (run.checkpoint or {}).get("last_source_url")
+    resuming = bool(resume_external_id or resume_source_url)
+
     try:
         for lead in adapter.collect(spec):
+            if resuming:
+                reached_checkpoint = (
+                    (resume_external_id and lead.source_external_id == resume_external_id)
+                    or (resume_source_url and lead.source_url == resume_source_url)
+                )
+                if reached_checkpoint:
+                    resuming = False
+                continue
             run.scanned += 1
             enrich_email = (job.options or {}).get(
                 "enrich_emails",
@@ -58,6 +70,10 @@ def execute_job(session: Session, job: SourceJob, settings: Settings, run: Parse
             run.checkpoint = {
                 "last_external_id": lead.source_external_id,
                 "last_source_url": lead.source_url,
+                "source": job.source,
+                "category": job.category,
+                "city": job.city,
+                "keywords": job.keywords or [],
             }
             session.commit()
             if run.inserted >= job.limit_new:

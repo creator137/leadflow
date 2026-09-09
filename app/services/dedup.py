@@ -18,6 +18,14 @@ class UpsertResult:
     matched_by: str | None = None
 
 
+def _merge_enrichment(company: Company, lead: CompanyLead) -> None:
+    if not company.email and lead.email:
+        company.email = lead.email
+    discovery = (lead.raw_data or {}).get("email_discovery")
+    if discovery:
+        company.raw_data = {**(company.raw_data or {}), "email_discovery": discovery}
+
+
 def find_duplicate(session: Session, lead: CompanyLead) -> tuple[Company | None, str | None]:
     domain = website_domain(lead.website)
     phone = normalize_phone(lead.phone)
@@ -58,6 +66,7 @@ def find_duplicate(session: Session, lead: CompanyLead) -> tuple[Company | None,
 def upsert_lead(session: Session, lead: CompanyLead) -> UpsertResult:
     duplicate, matched_by = find_duplicate(session, lead)
     if duplicate:
+        _merge_enrichment(duplicate, lead)
         return UpsertResult(duplicate, False, matched_by)
 
     company = Company(
@@ -88,6 +97,7 @@ def upsert_lead(session: Session, lead: CompanyLead) -> UpsertResult:
     except IntegrityError:
         duplicate, matched_by = find_duplicate(session, lead)
         if duplicate:
+            _merge_enrichment(duplicate, lead)
             return UpsertResult(duplicate, False, matched_by or "unique_constraint")
         raise
     return UpsertResult(company, True)

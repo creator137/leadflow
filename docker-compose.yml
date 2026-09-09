@@ -15,12 +15,17 @@ services:
     restart: unless-stopped
 
   migrate:
-    build: .
+    build:
+      context: .
+      network: host
     env_file:
       - path: .env
         required: false
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://leadflow:leadflow@postgres:5432/leadflow}
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     command: ["alembic", "upgrade", "head"]
     depends_on:
       postgres:
@@ -28,12 +33,17 @@ services:
     restart: "no"
 
   api:
-    build: .
+    build:
+      context: .
+      network: host
     env_file:
       - path: .env
         required: false
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://leadflow:leadflow@postgres:5432/leadflow}
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     ports:
       - "8000:8000"
     depends_on:
@@ -42,12 +52,17 @@ services:
     restart: unless-stopped
 
   worker:
-    build: .
+    build:
+      context: .
+      network: host
     env_file:
       - path: .env
         required: false
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://leadflow:leadflow@postgres:5432/leadflow}
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     command: ["python", "-m", "app.worker"]
     depends_on:
       migrate:

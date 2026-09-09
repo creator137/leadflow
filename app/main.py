@@ -218,6 +218,38 @@ def run_parser_job(
     return run
 
 
+@app.post("/api/parser-runs/{run_id}/resume", response_model=ParserRunRead, status_code=status.HTTP_202_ACCEPTED)
+def resume_parser_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_db),
+) -> ParserRun:
+    run = session.get(ParserRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Parser run not found")
+    if run.status not in {"failed", "blocked", "exhausted"}:
+        raise HTTPException(status_code=409, detail=f"Parser run with status {run.status!r} cannot be resumed")
+    job = session.get(SourceJob, run.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Parser job not found")
+    checkpoint = run.checkpoint or {}
+    expected = {
+        "source": job.source,
+        "category": job.category,
+        "city": job.city,
+        "keywords": job.keywords or [],
+    }
+    if checkpoint and any(checkpoint.get(key, value) != value for key, value in expected.items()):
+        raise HTTPException(status_code=409, detail="Parser job parameters changed after the checkpoint")
+    run.status = "queued"
+    run.message = None
+    run.finished_at = None
+    session.commit()
+    session.refresh(run)
+    background_tasks.add_task(_run_in_background, job.id, run.id)
+    return run
+
+
 @app.get("/api/parser-runs", response_model=list[ParserRunRead])
 def parser_runs(limit: int = Query(100, ge=1, le=1000), session: Session = Depends(get_db)) -> list[ParserRun]:
     return list(session.scalars(select(ParserRun).order_by(ParserRun.started_at.desc()).limit(limit)))
