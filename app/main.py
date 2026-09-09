@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.config import get_settings, validate_production_secrets
 from app.db import SessionLocal, get_db
 from app.models import (
     AIConfig, Campaign, Company, Direction, DirectionRun, EmailDelivery, EmailTemplate,
@@ -23,7 +23,7 @@ from app.schemas import (
     AIConfigCreate, AIConfigRead, CampaignCreate, CampaignRead, CampaignUpdate, CompanyRead, CompanyUpdate,
     DeliveryRead, DirectionCreate, DirectionRead, DirectionRunRead, DirectionUpdate, EmailTemplateCreate,
     EmailTemplateRead, EmailTemplateUpdate, GoogleSheetsConfigCreate, GoogleSheetsConfigRead, MailAccountCreate,
-    MailAccountRead, MailAccountUpdate, ParserRunRead,
+    MailAccountRead, MailAccountUpdate, ManualSendCreate, ParserRunRead, SuppressionCreate, TemplatePreview, TemplateTestSend,
     PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead, SourceJobCreate, SourceJobRead, SourceJobUpdate,
 )
 from app.services.collection import execute_job
@@ -31,8 +31,8 @@ from app.services.company_enrichment import CompanyEnrichmentService
 from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.directions import archive_direction, create_direction, serialize_direction, update_direction
 from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_config, sync_companies
-from app.services.mailing import execute_campaign, test_imap, test_smtp
-from app.services.personalized import send_personalized
+from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, execute_campaign, process_queue, render_template_parts
+from app.services.personalized import ConfiguredAIProvider, send_personalized
 from app.services.secrets import decrypt_secret, encrypt_secret
 from app.services.provenance import apply_field
 from app.sources.phrase_search import execute_phrase_search
@@ -40,6 +40,11 @@ from app.sources.phrase_search import execute_phrase_search
 app = FastAPI(title="LeadFlow", version="0.1.0")
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.on_event("startup")
+def security_startup_check() -> None:
+    validate_production_secrets(get_settings())
 
 
 @app.middleware("http")
@@ -59,6 +64,9 @@ async def optional_basic_auth(request: Request, call_next):
                 pass
         if not valid:
             return Response(status_code=401, headers={"WWW-Authenticate": "Basic"})
+    if request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        if request.headers.get("X-LeadFlow-CSRF") != "1":
+            return Response("CSRF validation failed", status_code=403)
     return await call_next(request)
 
 
@@ -234,6 +242,7 @@ def dashboard(
     source: str | None = None,
     mailbox: str | None = None,
     template: str | None = None,
+    direction: str | None = None,
     session: Session = Depends(get_db),
 ) -> dict[str, int]:
     company_filters = []
@@ -258,6 +267,9 @@ def dashboard(
         delivery_base = delivery_base.where(EmailDelivery.mailbox_id == mailbox)
     if template:
         delivery_base = delivery_base.where(EmailDelivery.template_id == template)
+    if direction:
+        delivery_base = delivery_base.where(EmailDelivery.direction_id == direction)
+    queued = session.scalar(delivery_base.where(EmailDelivery.status.in_(["queued", "sending"]))) or 0
     sent = session.scalar(delivery_base.where(EmailDelivery.sent_at.is_not(None))) or 0
     send_errors = session.scalar(delivery_base.where(EmailDelivery.status == "send_error")) or 0
     opened = session.scalar(delivery_base.where(EmailDelivery.opened_at.is_not(None))) or 0
@@ -269,6 +281,7 @@ def dashboard(
         "companies": total,
         "new_today": new_today,
         "email_found": with_email,
+        "queued": queued,
         "sent": sent,
         "send_errors": send_errors,
         "bounce": bounce,
@@ -403,14 +416,36 @@ def update_mail_account(account_id: str, payload: MailAccountUpdate, session: Se
     return account
 
 
-@app.post("/api/mail-accounts/{account_id}/test")
-def test_mail_account(account_id: str, session: Session = Depends(get_db)) -> dict[str, str]:
+@app.delete("/api/mail-accounts/{account_id}", status_code=204)
+def delete_mail_account(account_id: str, session: Session = Depends(get_db)) -> Response:
     account = session.get(MailAccount, account_id)
     if not account:
         raise HTTPException(404, "Mail account not found")
-    test_smtp(account)
-    test_imap(account)
-    return {"status": "ok", "smtp": "ok", "imap": "ok"}
+    if session.scalar(select(EmailDelivery.id).where(EmailDelivery.mailbox_id == account_id).limit(1)):
+        raise HTTPException(409, "Mailbox has email history; disable it instead")
+    session.delete(account); session.commit()
+    return Response(status_code=204)
+
+
+@app.post("/api/mail-accounts/{account_id}/test-smtp")
+def test_mail_account_smtp(account_id: str, session: Session = Depends(get_db)) -> dict[str, bool | str]:
+    account = session.get(MailAccount, account_id)
+    if not account: raise HTTPException(404, "Mail account not found")
+    return diagnose_smtp(account)
+
+
+@app.post("/api/mail-accounts/{account_id}/test-imap")
+def test_mail_account_imap(account_id: str, session: Session = Depends(get_db)) -> dict[str, bool | str]:
+    account = session.get(MailAccount, account_id)
+    if not account: raise HTTPException(404, "Mail account not found")
+    return diagnose_imap(account)
+
+
+@app.post("/api/mail-accounts/{account_id}/test")
+def test_mail_account(account_id: str, session: Session = Depends(get_db)) -> dict[str, object]:
+    account = session.get(MailAccount, account_id)
+    if not account: raise HTTPException(404, "Mail account not found")
+    return {"smtp": diagnose_smtp(account), "imap": diagnose_imap(account)}
 
 
 @app.get("/api/templates", response_model=list[EmailTemplateRead])
@@ -437,6 +472,32 @@ def update_template(template_id: str, payload: EmailTemplateUpdate, session: Ses
     session.commit()
     session.refresh(template)
     return template
+
+
+@app.delete("/api/templates/{template_id}", status_code=204)
+def delete_template(template_id: str, session: Session = Depends(get_db)) -> Response:
+    template = session.get(EmailTemplate, template_id)
+    if not template: raise HTTPException(404, "Template not found")
+    if session.scalar(select(EmailDelivery.id).where(EmailDelivery.template_id == template_id).limit(1)):
+        raise HTTPException(409, "Template has email history; disable it instead")
+    session.delete(template); session.commit(); return Response(status_code=204)
+
+
+@app.post("/api/templates/{template_id}/preview")
+def preview_template(template_id: str, payload: TemplatePreview, session: Session = Depends(get_db)) -> dict[str, str]:
+    template, company = session.get(EmailTemplate, template_id), session.get(Company, payload.company_id)
+    if not template or not company: raise HTTPException(404, "Template or company not found")
+    subject, html, text = render_template_parts(template, company)
+    return {"subject": subject, "html_body": html, "text_body": text}
+
+
+@app.post("/api/templates/{template_id}/test-send", response_model=DeliveryRead)
+def test_send_template(template_id: str, payload: TemplateTestSend, session: Session = Depends(get_db)) -> EmailDelivery:
+    template, company, account = session.get(EmailTemplate, template_id), session.get(Company, payload.company_id), session.get(MailAccount, payload.mailbox_id)
+    if not template or not company or not account: raise HTTPException(404, "Template, company, or mailbox not found")
+    delivery = build_delivery(session, company, account, template, get_settings(), send_mode="test", recipient_override=payload.recipient_email)
+    process_queue(session, get_settings(), "api-test-send", 1)
+    session.refresh(delivery); return delivery
 
 
 @app.get("/api/campaigns", response_model=list[CampaignRead])
@@ -480,9 +541,56 @@ def run_campaign(campaign_id: str, session: Session = Depends(get_db)) -> dict[s
     return execute_campaign(session, campaign, get_settings())
 
 
+@app.post("/api/campaigns/{campaign_id}/pause", response_model=CampaignRead)
+def pause_campaign(campaign_id: str, session: Session = Depends(get_db)) -> Campaign:
+    campaign = session.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, "Campaign not found")
+    campaign.status, campaign.active = "paused", False; session.commit(); session.refresh(campaign); return campaign
+
+
+@app.post("/api/campaigns/{campaign_id}/resume", response_model=CampaignRead)
+def resume_campaign(campaign_id: str, session: Session = Depends(get_db)) -> Campaign:
+    campaign = session.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, "Campaign not found")
+    campaign.status, campaign.active = "running", True; session.commit(); session.refresh(campaign); return campaign
+
+
 @app.get("/api/deliveries", response_model=list[DeliveryRead])
-def deliveries(limit: int = Query(100, ge=1, le=1000), session: Session = Depends(get_db)) -> list[EmailDelivery]:
-    return list(session.scalars(select(EmailDelivery).order_by(EmailDelivery.sent_at.desc().nullslast()).limit(limit)))
+def deliveries(status_filter: str | None = None, mailbox: str | None = None, template: str | None = None, limit: int = Query(100, ge=1, le=1000), session: Session = Depends(get_db)) -> list[EmailDelivery]:
+    query = select(EmailDelivery).order_by(EmailDelivery.created_at.desc()).limit(limit)
+    if status_filter: query = query.where(EmailDelivery.status == status_filter)
+    if mailbox: query = query.where(EmailDelivery.mailbox_id == mailbox)
+    if template: query = query.where(EmailDelivery.template_id == template)
+    return list(session.scalars(query))
+
+
+@app.post("/api/companies/{company_id}/send", response_model=DeliveryRead, status_code=202)
+def manual_send(company_id: str, payload: ManualSendCreate, session: Session = Depends(get_db)) -> EmailDelivery:
+    company, account, template = session.get(Company, company_id), session.get(MailAccount, payload.mailbox_id), session.get(EmailTemplate, payload.template_id)
+    if not company or not account or not template: raise HTTPException(404, "Company, mailbox, or template not found")
+    try:
+        return build_delivery(session, company, account, template, get_settings(), direction_id=payload.direction_id, send_mode="manual", overrides=payload.model_dump(exclude={"mailbox_id", "template_id", "direction_id"}))
+    except ValueError as exc: raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/companies/{company_id}/personalization-preview")
+def personalization_preview(company_id: str, session: Session = Depends(get_db)) -> dict[str, str]:
+    company = session.get(Company, company_id)
+    if not company: raise HTTPException(404, "Company not found")
+    config = session.scalar(select(AIConfig).where(AIConfig.active.is_(True)).limit(1))
+    if not config: raise HTTPException(409, "AI provider is not configured")
+    return {"personalized_text": ConfiguredAIProvider(config).generate(company)}
+
+
+@app.get("/api/suppressions")
+def suppressions(session: Session = Depends(get_db)) -> list[dict[str, object]]:
+    return [{"email": row.email, "reason": row.reason, "note": row.note, "active": row.active, "created_at": row.created_at} for row in session.scalars(select(Suppression).order_by(Suppression.created_at.desc()))]
+
+
+@app.post("/api/suppressions", status_code=201)
+def add_suppression(payload: SuppressionCreate, session: Session = Depends(get_db)) -> dict[str, object]:
+    row = Suppression(email=payload.email.strip().casefold(), reason=payload.reason, note=payload.note, active=True)
+    session.merge(row); session.commit(); return {"email": row.email, "reason": row.reason, "active": True}
 
 
 @app.post("/api/companies/{company_id}/send-personalized", response_model=DeliveryRead)
@@ -529,12 +637,12 @@ def tracking_click(token: str, session: Session = Depends(get_db)) -> RedirectRe
 
 @app.get("/unsubscribe/{token}", response_class=HTMLResponse, include_in_schema=False)
 def unsubscribe(token: str, session: Session = Depends(get_db)) -> str:
-    delivery = session.scalar(select(EmailDelivery).where(EmailDelivery.tracking_token == token))
+    delivery = session.scalar(select(EmailDelivery).where(EmailDelivery.unsubscribe_token == token))
     if not delivery:
         raise HTTPException(404, "Delivery not found")
     delivery.status = "unsubscribed"
     delivery.unsubscribed_at = datetime.now(timezone.utc)
-    session.merge(Suppression(email=delivery.recipient_email, reason="unsubscribe"))
+    session.merge(Suppression(email=delivery.recipient_email, reason="unsubscribe", source_delivery_id=delivery.id, active=True))
     session.commit()
     return "<h1>Вы отписаны</h1><p>На этот адрес больше не будут отправляться письма.</p>"
 

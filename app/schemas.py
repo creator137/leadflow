@@ -208,6 +208,7 @@ class MailAccountCreate(BaseModel):
     name: str
     from_email: str
     from_name: str | None = None
+    reply_to: str | None = None
     smtp_host: str
     smtp_port: int = 587
     smtp_login: str
@@ -217,6 +218,8 @@ class MailAccountCreate(BaseModel):
     imap_port: int = 993
     imap_login: str
     imap_password: str
+    imap_security: Literal["none", "starttls", "ssl"] = "ssl"
+    forward_replies_to: str | None = None
     active: bool = True
     daily_limit: int = Field(default=100, ge=1, le=10000)
 
@@ -226,6 +229,7 @@ class MailAccountRead(ORMModel):
     name: str
     from_email: str
     from_name: str | None
+    reply_to: str | None
     smtp_host: str
     smtp_port: int
     smtp_login: str
@@ -233,12 +237,28 @@ class MailAccountRead(ORMModel):
     imap_host: str
     imap_port: int
     imap_login: str
+    imap_security: str
+    forward_replies_to: str | None
     active: bool
     daily_limit: int
     created_at: datetime
+    updated_at: datetime
 
 
 class MailAccountUpdate(BaseModel):
+    name: str | None = None
+    from_email: str | None = None
+    from_name: str | None = None
+    reply_to: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int | None = Field(default=None, ge=1, le=65535)
+    smtp_login: str | None = None
+    smtp_security: Literal["none", "starttls", "ssl"] | None = None
+    imap_host: str | None = None
+    imap_port: int | None = Field(default=None, ge=1, le=65535)
+    imap_login: str | None = None
+    imap_security: Literal["none", "starttls", "ssl"] | None = None
+    forward_replies_to: str | None = None
     active: bool | None = None
     daily_limit: int | None = Field(default=None, ge=1, le=10000)
     smtp_password: str | None = None
@@ -248,21 +268,26 @@ class MailAccountUpdate(BaseModel):
 class EmailTemplateCreate(BaseModel):
     name: str
     category: str | None = None
+    direction_id: str | None = None
     subject_template: str
     html_template: str
+    text_template: str = ""
     active: bool = True
 
 
 class EmailTemplateRead(EmailTemplateCreate, ORMModel):
     id: str
     created_at: datetime
+    updated_at: datetime
 
 
 class EmailTemplateUpdate(BaseModel):
     name: str | None = None
     category: str | None = None
+    direction_id: str | None = None
     subject_template: str | None = None
     html_template: str | None = None
+    text_template: str | None = None
     active: bool | None = None
 
 
@@ -270,11 +295,15 @@ class CampaignCreate(BaseModel):
     name: str
     category: str | None = None
     city: str | None = None
+    direction_id: str | None = None
     mailbox_id: str
     template_id: str
     schedule: str | None = None
     daily_limit: int = Field(default=50, ge=1)
     run_limit: int = Field(default=20, ge=1)
+    sending_interval_seconds: int = Field(default=60, ge=1, le=86400)
+    cooldown_days: int = Field(default=30, ge=0, le=3650)
+    status: Literal["paused", "running", "completed"] = "paused"
     active: bool = False
 
 
@@ -287,23 +316,32 @@ class CampaignUpdate(BaseModel):
     name: str | None = None
     category: str | None = None
     city: str | None = None
+    direction_id: str | None = None
     mailbox_id: str | None = None
     template_id: str | None = None
     schedule: str | None = None
     daily_limit: int | None = Field(default=None, ge=1)
     run_limit: int | None = Field(default=None, ge=1)
+    sending_interval_seconds: int | None = Field(default=None, ge=1, le=86400)
+    cooldown_days: int | None = Field(default=None, ge=0, le=3650)
+    status: Literal["paused", "running", "completed"] | None = None
     active: bool | None = None
 
 
 class DeliveryRead(ORMModel):
     id: str
     campaign_id: str | None
+    direction_id: str | None
     company_id: str
     mailbox_id: str
     template_id: str
     recipient_email: str
+    recipient_name: str | None
     subject: str
     status: str
+    message_id: str | None
+    provider_message_id: str | None
+    in_reply_to: str | None
     error: str | None
     sent_at: datetime | None
     opened_at: datetime | None
@@ -311,6 +349,34 @@ class DeliveryRead(ORMModel):
     replied_at: datetime | None
     bounced_at: datetime | None
     unsubscribed_at: datetime | None
+    attempt_count: int
+    next_attempt_at: datetime | None
+    created_at: datetime
+
+
+class TemplatePreview(BaseModel):
+    company_id: str
+
+
+class TemplateTestSend(BaseModel):
+    mailbox_id: str
+    recipient_email: str
+    company_id: str
+
+
+class ManualSendCreate(BaseModel):
+    mailbox_id: str
+    template_id: str
+    direction_id: str | None = None
+    subject: str | None = None
+    html_body: str | None = None
+    text_body: str | None = None
+
+
+class SuppressionCreate(BaseModel):
+    email: str
+    reason: Literal["unsubscribe", "hard_bounce", "manual", "complaint", "invalid"] = "manual"
+    note: str | None = None
 
 
 class GoogleSheetsConfigCreate(BaseModel):

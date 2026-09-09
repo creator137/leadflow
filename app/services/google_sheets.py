@@ -10,8 +10,8 @@ from google.oauth2.service_account import Credentials
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Company, CompanyDirection, Direction, GoogleSheetsConfig, SheetRowMapping
-from app.config import Settings
+from app.models import Company, CompanyDirection, Direction, EmailDelivery, GoogleSheetsConfig, SheetRowMapping
+from app.config import Settings, get_settings
 from app.services.provenance import apply_field
 from app.services.secrets import decrypt_secret, encrypt_secret
 
@@ -110,6 +110,8 @@ class GoogleSheetsSyncService:
                 pass
         elif rows[0][:len(HEADERS)] != HEADERS:
             raise ValueError(f"Sheet {direction.sheet_tab!r} has an incompatible header row")
+        status_header = get_settings().google_sheets_email_status_header
+        status_index = rows[0].index(status_header) if status_header and status_header in rows[0] else None
 
         companies = list(self.session.scalars(
             select(Company).join(CompanyDirection, CompanyDirection.company_id == Company.id).where(
@@ -150,7 +152,17 @@ class GoogleSheetsSyncService:
                 inserted += 1
             else:
                 updated += 1
-            worksheet.update(range_name=f"A{row_number}:N{row_number}", values=[company_row(company)])
+            output = company_row(company)
+            end_column = "N"
+            if status_index is not None:
+                while len(output) <= status_index:
+                    output.append("")
+                latest_status = self.session.scalar(select(EmailDelivery.status).where(
+                    EmailDelivery.company_id == company.id, EmailDelivery.direction_id == direction.id,
+                ).order_by(EmailDelivery.created_at.desc()).limit(1))
+                output[status_index] = latest_status or ""
+                end_column = gspread.utils.rowcol_to_a1(1, len(output)).rstrip("1")
+            worksheet.update(range_name=f"A{row_number}:{end_column}{row_number}", values=[output])
             mapping = self.session.scalar(select(SheetRowMapping).where(
                 SheetRowMapping.company_id == company.id,
                 SheetRowMapping.direction_id == direction.id,

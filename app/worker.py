@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -12,7 +13,7 @@ from app.models import Campaign, Direction, DirectionRun, MailAccount, SourceJob
 from app.services.collection import execute_job
 from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.imap_monitor import poll_mailbox
-from app.services.mailing import execute_campaign
+from app.services.mailing import execute_campaign, process_queue
 
 logging.basicConfig(level=get_settings().log_level)
 logger = logging.getLogger(__name__)
@@ -78,7 +79,7 @@ def refresh_directions() -> None:
 def run_campaign(campaign_id: str) -> None:
     with SessionLocal() as session:
         campaign = session.get(Campaign, campaign_id)
-        if campaign and campaign.active:
+        if campaign and campaign.active and campaign.status == "running":
             execute_campaign(session, campaign, get_settings())
 
 
@@ -90,6 +91,13 @@ def poll_imap() -> None:
                 poll_mailbox(session, account, get_settings().manager_email)
             except Exception:
                 logger.exception("IMAP polling failed for %s", account.id)
+
+
+def drain_email_queue() -> None:
+    with SessionLocal() as session:
+        result = process_queue(session, get_settings(), f"{socket.gethostname()}-email", limit=5)
+        if result["sent"] or result["errors"]:
+            logger.info("Email queue processed: %s", result)
 
 
 def refresh_campaigns() -> None:
@@ -120,6 +128,7 @@ def main() -> None:
     scheduler.add_job(refresh_directions, "interval", seconds=60, id="refresh-directions", replace_existing=True)
     scheduler.add_job(refresh_campaigns, "interval", seconds=60, id="refresh-campaigns", replace_existing=True)
     scheduler.add_job(poll_imap, "interval", minutes=5, id="imap", replace_existing=True, max_instances=1)
+    scheduler.add_job(drain_email_queue, "interval", seconds=10, id="email-queue", replace_existing=True, max_instances=1)
     scheduler.start()
 
 

@@ -23,6 +23,7 @@ services:
         required: false
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://leadflow:leadflow@postgres:5432/leadflow}
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -41,6 +42,7 @@ services:
         required: false
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://leadflow:leadflow@postgres:5432/leadflow}
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me-before-production}
     dns:
@@ -62,6 +64,7 @@ services:
         required: false
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://leadflow:leadflow@postgres:5432/leadflow}
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
     dns:
       - 8.8.8.8
       - 1.1.1.1

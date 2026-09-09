@@ -235,6 +235,7 @@ class MailAccount(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     from_email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
     from_name: Mapped[str | None] = mapped_column(String(255))
+    reply_to: Mapped[str | None] = mapped_column(String(320))
     smtp_host: Mapped[str] = mapped_column(String(255), nullable=False)
     smtp_port: Mapped[int] = mapped_column(Integer, default=587)
     smtp_login: Mapped[str] = mapped_column(String(320), nullable=False)
@@ -244,9 +245,14 @@ class MailAccount(Base):
     imap_port: Mapped[int] = mapped_column(Integer, default=993)
     imap_login: Mapped[str] = mapped_column(String(320), nullable=False)
     imap_password_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    imap_security: Mapped[str] = mapped_column(String(16), default="ssl")
+    imap_uidvalidity: Mapped[int | None] = mapped_column(Integer)
+    imap_last_uid: Mapped[int] = mapped_column(Integer, default=0)
+    forward_replies_to: Mapped[str | None] = mapped_column(String(320))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     daily_limit: Mapped[int] = mapped_column(Integer, default=100)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class EmailTemplate(Base):
@@ -255,10 +261,13 @@ class EmailTemplate(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     category: Mapped[str | None] = mapped_column(String(255), index=True)
+    direction_id: Mapped[str | None] = mapped_column(ForeignKey("directions.id", ondelete="SET NULL"), index=True)
     subject_template: Mapped[str] = mapped_column(Text, nullable=False)
     html_template: Mapped[str] = mapped_column(Text, nullable=False)
+    text_template: Mapped[str] = mapped_column(Text, default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class Campaign(Base):
@@ -268,13 +277,18 @@ class Campaign(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     category: Mapped[str | None] = mapped_column(String(255), index=True)
     city: Mapped[str | None] = mapped_column(String(255), index=True)
+    direction_id: Mapped[str | None] = mapped_column(ForeignKey("directions.id", ondelete="SET NULL"), index=True)
     mailbox_id: Mapped[str] = mapped_column(ForeignKey("mail_accounts.id"), nullable=False)
     template_id: Mapped[str] = mapped_column(ForeignKey("email_templates.id"), nullable=False)
     schedule: Mapped[str | None] = mapped_column(String(100))
     daily_limit: Mapped[int] = mapped_column(Integer, default=50)
     run_limit: Mapped[int] = mapped_column(Integer, default=20)
+    sending_interval_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    cooldown_days: Mapped[int] = mapped_column(Integer, default=30)
+    status: Mapped[str] = mapped_column(String(32), default="paused", index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class EmailDelivery(Base):
@@ -282,24 +296,40 @@ class EmailDelivery(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     campaign_id: Mapped[str | None] = mapped_column(ForeignKey("campaigns.id"), index=True)
+    direction_id: Mapped[str | None] = mapped_column(ForeignKey("directions.id", ondelete="SET NULL"), index=True)
     company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), nullable=False, index=True)
     mailbox_id: Mapped[str] = mapped_column(ForeignKey("mail_accounts.id"), nullable=False, index=True)
     template_id: Mapped[str] = mapped_column(ForeignKey("email_templates.id"), nullable=False)
     recipient_email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    recipient_name: Mapped[str | None] = mapped_column(String(255))
     subject: Mapped[str] = mapped_column(Text, nullable=False)
     html_body: Mapped[str] = mapped_column(Text, nullable=False)
+    text_body: Mapped[str] = mapped_column(Text, default="")
+    send_mode: Mapped[str] = mapped_column(String(32), default="campaign")
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     tracking_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    unsubscribe_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    provider_message_id: Mapped[str | None] = mapped_column(String(998))
     message_id: Mapped[str | None] = mapped_column(String(998), unique=True)
+    in_reply_to: Mapped[str | None] = mapped_column(String(998))
     error: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    locked_by: Mapped[str | None] = mapped_column(String(100))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     clicked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     bounced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     unsubscribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    __table_args__ = (Index("uq_delivery_company_recipient", "company_id", "recipient_email", unique=True),)
+    __table_args__ = (
+        Index("uq_delivery_campaign_company_recipient", "campaign_id", "company_id", "recipient_email", unique=True),
+    )
 
 
 class TrackedLink(Base):
@@ -315,6 +345,9 @@ class Suppression(Base):
 
     email: Mapped[str] = mapped_column(String(320), primary_key=True)
     reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_delivery_id: Mapped[str | None] = mapped_column(ForeignKey("email_deliveries.id", ondelete="SET NULL"))
+    note: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -325,10 +358,20 @@ class InboundReply(Base):
     delivery_id: Mapped[str | None] = mapped_column(ForeignKey("email_deliveries.id"), index=True)
     mailbox_id: Mapped[str] = mapped_column(ForeignKey("mail_accounts.id"), nullable=False)
     message_id: Mapped[str | None] = mapped_column(String(998), unique=True)
+    imap_uid: Mapped[int | None] = mapped_column(Integer)
+    imap_uidvalidity: Mapped[int | None] = mapped_column(Integer)
+    in_reply_to: Mapped[str | None] = mapped_column(String(998))
+    references: Mapped[str | None] = mapped_column(Text)
     sender: Mapped[str] = mapped_column(String(320), nullable=False)
     subject: Mapped[str | None] = mapped_column(Text)
     text_body: Mapped[str | None] = mapped_column(Text)
+    bounce_type: Mapped[str | None] = mapped_column(String(32))
+    forwarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("mailbox_id", "imap_uidvalidity", "imap_uid", name="uq_inbound_mailbox_uid"),
+    )
 
 
 class GoogleSheetsConfig(Base):
