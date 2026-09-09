@@ -1,0 +1,987 @@
+<!DOCTYPE html>
+<html lang="kk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parser 2GIS</title>
+<style>
+  :root{
+    --bg:#f5f6fa; --surface:#fff; --text:#0f172a; --muted:#64748b; --line:#e6e8ef;
+    --primary:#6366f1; --primary-dark:#4f51e0; --on-primary:#fff;
+    --wa:#25d366; --tg:#229ed9; --ig:#d6307a; --gis:#1e9e4a;
+    --danger:#dc2626; --ok:#16a34a; --warn:#b45309;
+    --shadow:0 1px 2px rgba(16,24,40,.05),0 6px 20px rgba(16,24,40,.06);
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;font-size:14px}
+  .app{display:grid;grid-template-columns:380px 1fr;min-height:100vh}
+  /* ---- Sidebar (control panel) ---- */
+  aside{background:var(--surface);border-right:1px solid var(--line);
+    padding:22px 22px 28px;display:flex;flex-direction:column;gap:20px;
+    position:sticky;top:0;align-self:start;max-height:100vh;overflow:auto}
+  .brand{display:flex;align-items:center;gap:10px}
+  .brand .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--primary),#8b5cf6);
+    display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:16px}
+  .brand h1{font-size:17px;margin:0;font-weight:700;letter-spacing:-.01em}
+  .langbtns{margin-left:auto;display:flex;gap:3px}
+  .langbtns button{background:none;border:1px solid transparent;border-radius:6px;padding:3px;
+    line-height:0;cursor:pointer;opacity:.5;filter:grayscale(.5);display:flex}
+  .langbtns button.on{opacity:1;filter:none;border-color:var(--line);background:#fff;box-shadow:var(--shadow)}
+  .langbtns svg{display:block}
+  .group{display:flex;flex-direction:column;gap:9px}
+  .group>label.h{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  textarea,input:not([type=checkbox]),select{width:100%;border:1px solid var(--line);border-radius:10px;
+    padding:10px 12px;font:inherit;background:#fff;color:var(--text);outline:none;
+    transition:border-color .15s,box-shadow .15s}
+  select{-webkit-appearance:menulist;appearance:menulist}
+  textarea{min-height:92px;resize:vertical;line-height:1.45}
+  textarea:focus,input:focus,select:focus{border-color:var(--primary);box-shadow:0 0 0 4px rgba(99,102,241,.13)}
+  textarea.invalid,textarea.invalid:focus{border-color:var(--danger);box-shadow:0 0 0 4px rgba(220,38,38,.16)}
+  @keyframes shake{10%,90%{transform:translateX(-1px)}30%,70%{transform:translateX(2px)}50%{transform:translateX(-3px)}}
+  textarea.shake{animation:shake .4s ease}
+  .hint{font-size:12px;color:var(--muted);line-height:1.4}
+  .hint.err{color:var(--danger);font-weight:600}
+  .check{display:flex;align-items:center;gap:9px;font-size:13.5px;cursor:pointer;
+    padding:7px 9px;border-radius:9px;transition:background .12s}
+  .check:hover{background:#f6f7fb}
+  .check input{width:17px;height:17px;accent-color:var(--primary);cursor:pointer}
+  .rowmini{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .field{display:flex;flex-direction:column;gap:5px}
+  .field span{font-size:12px;color:var(--muted)}
+  .actions-bar{display:flex;gap:10px;margin-top:4px}
+  button{font:inherit;font-weight:650;border:none;border-radius:11px;padding:12px 16px;cursor:pointer;
+    transition:filter .12s,transform .05s,background .15s}
+  button:active{transform:translateY(1px)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .btn-run{flex:1;background:var(--primary);color:var(--on-primary)}
+  .btn-run:hover:not(:disabled){background:var(--primary-dark)}
+  .btn-stop{flex:1;background:#fff;color:var(--danger);border:1px solid #f3c6c6}
+  .btn-stop:hover:not(:disabled){background:#fef2f2}
+  /* ---- Main ---- */
+  main{display:flex;flex-direction:column;min-width:0}
+  .topbar{position:sticky;top:0;z-index:5;background:rgba(245,246,250,.85);
+    backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--line);
+    padding:14px clamp(16px,3vw,28px);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;
+    padding:6px 12px;border-radius:999px;background:#eef0f6;color:var(--muted)}
+  .pill .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+  .pill.run{background:#eef2ff;color:var(--primary)} .pill.run .dot{background:var(--primary);animation:pulse 1.1s infinite}
+  .pill.done{background:#eaf7ee;color:var(--ok)} .pill.done .dot{background:var(--ok)}
+  .pill.err{background:#fdeaea;color:var(--danger)} .pill.err .dot{background:var(--danger)}
+  .pill.stop{background:#fff5e6;color:var(--warn)} .pill.stop .dot{background:var(--warn)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  #count{font-size:13.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+  #search{flex:1;min-width:180px;padding:10px 13px;border:1px solid var(--line);border-radius:11px;
+    background:#fff;font:inherit;outline:none}
+  #search:focus{border-color:var(--primary);box-shadow:0 0 0 4px rgba(99,102,241,.13)}
+  .sortsel{width:auto;padding:9px 11px;font-size:13px}
+  .dl{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .dl-label{font-size:13px;color:var(--muted);font-weight:600}
+  .dl-fmt{background:#0f172a;color:#fff;padding:9px 13px;font-size:12.5px;font-weight:650;border-radius:9px}
+  .dl-fmt:hover:not(:disabled){filter:brightness(1.3)}
+  .btn-clear{background:#fff;color:var(--muted);border:1px solid var(--line);padding:9px 12px;
+    font-size:12.5px;font-weight:600;border-radius:9px}
+  .btn-clear:hover:not(:disabled){background:#fef2f2;color:var(--danger);border-color:#f3c6c6}
+  .content{padding:clamp(16px,3vw,28px);min-width:0}
+  details.log{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+    margin-bottom:18px;box-shadow:var(--shadow)}
+  details.log summary{cursor:pointer;padding:13px 16px;font-weight:650;list-style:none;display:flex;
+    align-items:center;gap:8px;user-select:none}
+  details.log summary::-webkit-details-marker{display:none}
+  details.log summary::before{content:"›";font-size:18px;transition:transform .15s;color:var(--muted)}
+  details.log[open] summary::before{transform:rotate(90deg)}
+  #logbox{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;
+    line-height:1.6;color:#334155;background:#fafbfd;border-top:1px solid var(--line);
+    padding:12px 16px;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+  .grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(310px,1fr))}
+  .grid.cols-1{grid-template-columns:1fr}
+  .grid.cols-2{grid-template-columns:repeat(2,1fr)}
+  .grid.cols-3{grid-template-columns:repeat(3,1fr)}
+  .viewbtns{display:flex;gap:3px;background:#eef0f6;border-radius:9px;padding:3px}
+  .viewbtns button{background:none;border:none;padding:6px 7px;border-radius:7px;cursor:pointer;
+    color:var(--muted);display:flex;align-items:center}
+  .viewbtns button.on{background:#fff;color:var(--primary);box-shadow:0 1px 2px rgba(16,24,40,.08)}
+  .viewbtns svg{display:block}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:17px 17px 15px;
+    box-shadow:var(--shadow);display:flex;flex-direction:column;gap:8px;
+    transition:transform .12s,box-shadow .12s}
+  .card:hover{transform:translateY(-2px);box-shadow:0 8px 26px rgba(16,24,40,.1)}
+  .card-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .card h2{font-size:16px;margin:0;font-weight:650;letter-spacing:-.01em;line-height:1.25}
+  .rating{white-space:nowrap;color:#a9700a;background:#fff6e6;border:1px solid #ffe6b0;
+    padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+  .rubrics{color:var(--primary);font-size:12.5px;font-weight:500}
+  .meta{color:var(--muted);font-size:13px;line-height:1.4}
+  .acts{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}
+  .b{display:inline-flex;align-items:center;gap:5px;text-decoration:none;font-size:12.5px;font-weight:600;
+    color:var(--text);background:#f1f3f8;border:1px solid var(--line);padding:6px 10px;border-radius:9px;
+    transition:filter .12s,transform .05s}
+  .b:hover{filter:brightness(.96)} .b:active{transform:scale(.97)}
+  .b.wa{background:var(--wa);border-color:transparent;color:#fff}
+  .b.tg{background:#e8f4fb;border-color:#cfe9f8;color:#1b7fb8}
+  .b.ig{background:#fdeef5;border-color:#f7d3e4;color:var(--ig)}
+  .b.gis{background:#eafaef;border-color:#cdeed7;color:var(--gis)}
+  .card.done{opacity:.55}
+  .card.done:hover{opacity:.85}
+  .cardfoot{display:flex;gap:7px;align-items:center;margin-top:8px;padding-top:9px;border-top:1px dashed var(--line)}
+  .markbtn{flex:none;font-size:12px;font-weight:600;padding:6px 10px;border-radius:8px;
+    border:1px solid var(--line);background:#fff;color:var(--muted);cursor:pointer}
+  .markbtn.on{background:#eaf7ee;color:var(--ok);border-color:#cdeed7}
+  .note{flex:1;min-width:0;font-size:12.5px;padding:6px 9px;border:1px solid var(--line);border-radius:8px}
+  .empty{text-align:center;color:var(--muted);padding:70px 16px;font-size:15px;line-height:1.6}
+  .empty .big{font-size:42px;margin-bottom:10px}
+  /* Collapsible sidebar sections (generator / advanced) */
+  details.sect{border:1px solid var(--line);border-radius:11px;background:#fbfbfe}
+  details.sect>summary{cursor:pointer;padding:10px 12px;font-size:12.5px;font-weight:700;
+    letter-spacing:.02em;color:#475569;list-style:none;user-select:none;display:flex;align-items:center;gap:7px}
+  details.sect>summary::-webkit-details-marker{display:none}
+  details.sect>summary::before{content:"›";font-size:16px;color:var(--muted);transition:transform .15s}
+  details.sect[open]>summary::before{transform:rotate(90deg)}
+  .sectbody{padding:4px 12px 12px;display:flex;flex-direction:column;gap:9px}
+  .genCities{max-height:150px;overflow:auto;border:1px solid var(--line);border-radius:9px;
+    padding:6px 8px;background:#fff;display:flex;flex-direction:column;gap:2px}
+  .genCities label{display:flex;align-items:center;gap:7px;font-size:13px;cursor:pointer;padding:2px 0}
+  .genCities input{accent-color:var(--primary)}
+  /* Cities multi-select dropdown (opens on click, like the country select) */
+  .msel{position:relative}
+  .msel-btn{width:100%;text-align:left;background:#fff;border:1px solid var(--line);border-radius:10px;
+    padding:10px 12px;font:inherit;font-weight:500;color:var(--text);cursor:pointer;
+    display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .msel-btn::after{content:"▾";color:var(--muted)}
+  .msel-btn:hover{border-color:#cdd1dd}
+  .msel.open .msel-btn{border-color:var(--primary);box-shadow:0 0 0 4px rgba(99,102,241,.13)}
+  .msel.open .msel-btn::after{content:"▴"}
+  .msel-panel{display:none;position:absolute;left:0;right:0;top:calc(100% + 5px);z-index:20;
+    background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:8px}
+  .msel.open .msel-panel{display:block}
+  .msel-tools{font-size:11px;padding:0 2px 7px;color:var(--muted)}
+  .msel-tools a{color:var(--primary);text-decoration:none}
+  .msel-tools a:hover{text-decoration:underline}
+  .msel-panel .genCities{border:none;border-radius:0;padding:0;max-height:210px}
+  .distGroup{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    color:var(--muted);padding:6px 0 2px;margin-top:2px}
+  .distGroup:first-child{margin-top:0}
+  .genDistHint{font-size:12px;color:var(--muted);padding:2px 0}
+  .genCities label .dcustom{margin-left:auto;color:var(--danger);cursor:pointer;font-size:15px;line-height:1;padding:0 2px}
+  .genRubList{max-height:210px;overflow:auto;margin-top:7px;display:flex;flex-direction:column;gap:1px}
+  .genRubList .ri{font-size:13px;padding:7px 9px;border-radius:7px;cursor:pointer}
+  .genRubList .ri:hover{background:#f1f3f8}
+  .genRubList .ri.sel{background:var(--primary);color:#fff}
+  .field a{color:var(--primary);text-decoration:none;font-size:11px}
+  .field a:hover{text-decoration:underline}
+  .btn-gen{background:#0f172a;color:#fff;padding:10px 14px}
+  .btn-gen:hover{filter:brightness(1.2)}
+  /* WhatsApp message templates */
+  .waList{display:flex;flex-direction:column;gap:6px}
+  .waRow{display:flex;gap:6px;align-items:center}
+  .waTpl{flex:1;width:auto;min-width:0}
+  .waDel{flex:none;width:36px;min-width:36px;padding:0;font-size:16px;line-height:1;cursor:pointer;
+    color:var(--danger);background:#fff;border:1px solid var(--line);border-radius:8px}
+  .waDel:hover{background:#fef2f2;border-color:#f3c6c6}
+  .btn-add{align-self:flex-start;margin-top:4px;background:#eef2ff;color:var(--primary);
+    border:1px solid #d8ddfb;padding:8px 12px;font-size:12.5px;font-weight:600;border-radius:9px}
+  .btn-add:hover{background:#e3e8fe}
+  /* Parse history list */
+  .histList{display:flex;flex-direction:column;gap:7px}
+  .histItem{border:1px solid var(--line);border-radius:10px;padding:9px 10px;background:#fff;
+    display:flex;flex-direction:column;gap:5px}
+  .histItem .hh{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .histItem .ht{font-size:12.5px;font-weight:600;color:var(--text)}
+  .histItem .hu{font-size:11.5px;color:var(--muted);line-height:1.35;word-break:break-all}
+  .histItem .hb{display:flex;gap:6px;flex-wrap:wrap}
+  .histItem .hbtn{font-size:11.5px;font-weight:600;border:1px solid var(--line);background:#f1f3f8;
+    color:var(--text);padding:5px 9px;border-radius:8px;cursor:pointer}
+  .histItem .hbtn:hover{filter:brightness(.96)}
+  .histItem .hbtn.open{background:var(--primary);color:#fff;border-color:transparent}
+  .histItem .hdel{margin-left:auto;color:var(--danger);background:none;border:none;cursor:pointer;font-size:16px;padding:0 4px}
+  .histbar{margin-bottom:2px}
+  #histMerge{width:100%;background:#eef2ff;color:var(--primary);border:1px solid #d8ddfb;
+    padding:8px 10px;font-size:12px;font-weight:600;border-radius:9px;cursor:pointer}
+  #histMerge:hover{background:#e3e8fe}
+  .hsel{display:flex;align-items:center;gap:6px;cursor:pointer}
+  .hsel input{accent-color:var(--primary);flex:none}
+  @media (max-width:1024px){
+    .app{grid-template-columns:1fr}
+    /* Drop the scroll container around the sidebar so native <select> pickers
+       open correctly on tablets/phones. */
+    aside{position:static;max-height:none;overflow:visible;border-right:none;border-bottom:1px solid var(--line)}
+    /* 16px prevents iOS auto-zoom; 44px meets touch-target guidance.
+       textarea keeps its taller height so multi-line templates stay visible. */
+    input:not([type=checkbox]),select,.msel-btn{font-size:16px;min-height:44px}
+    textarea{font-size:16px}
+    .check{padding:9px 9px} .check input{width:20px;height:20px}
+    /* Render the cities panel inline on touch instead of an absolute overlay. */
+    .msel-panel{position:static;box-shadow:none;margin-top:6px}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand"><div class="logo">2G</div><h1>Parser 2GIS</h1>
+      <div class="langbtns" id="langbtns">
+        <button data-lang="kk" title="Қазақша"><svg width="24" height="16" viewBox="0 0 24 16"><rect width="24" height="16" rx="2" fill="#00AFCA"/><circle cx="12" cy="7" r="3.4" fill="#FEC50C"/><rect x="4" y="12.2" width="16" height="1.4" rx=".7" fill="#FEC50C"/></svg></button>
+        <button data-lang="ru" title="Русский"><svg width="24" height="16" viewBox="0 0 24 16"><rect width="24" height="16" rx="2" fill="#fff" stroke="#e6e8ef" stroke-width=".7"/><rect x=".5" y="5.5" width="23" height="5.3" fill="#0039A6"/><rect x=".5" y="10.8" width="23" height="4.7" rx="2" fill="#D52B1E"/></svg></button>
+      </div>
+    </div>
+
+    <div class="group">
+      <label class="h" for="urls" data-i18n="urls_label">Сілтемелер</label>
+      <textarea id="urls" placeholder="https://2gis.kz/almaty/search/Кафе&#10;https://2gis.ru/moscow/search/Аптеки"></textarea>
+      <div class="hint" id="urlsHint" data-i18n="urls_hint">Әр жолда бір 2GIS сілтемесі. Бірнеше қала және айдар болуы мүмкін.</div>
+    </div>
+
+    <details class="sect" id="gen">
+      <summary data-i18n="gen_title">🔗 Сілтеме жасау</summary>
+      <div class="sectbody">
+        <label class="field"><span data-i18n="country">Ел</span><select id="genCountry"></select></label>
+        <div class="field">
+          <span data-i18n="cities">Қалалар</span>
+          <div class="msel" id="genCitiesWrap">
+            <button type="button" class="msel-btn" id="genCitiesBtn">Қалаларды таңдаңыз</button>
+            <div class="msel-panel" id="genCitiesPanel">
+              <div class="msel-tools"><a href="#" id="genAll" data-i18n="select_all">барлығын таңдау</a> · <a href="#" id="genNone" data-i18n="reset">тазалау</a></div>
+              <div class="genCities" id="genCities"></div>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <span data-i18n="district">Аудан (міндетті емес)</span>
+          <div class="msel" id="genDistWrap">
+            <button type="button" class="msel-btn" id="genDistBtn">Аудансыз</button>
+            <div class="msel-panel" id="genDistPanel">
+              <div class="msel-tools"><a href="#" id="genDistAll" data-i18n="select_all">барлығын таңдау</a> · <a href="#" id="genDistNone" data-i18n="reset">тазалау</a></div>
+              <div class="genCities" id="genDists"></div>
+              <input type="text" id="genDistCustom" data-i18n-ph="district_custom_ph" placeholder="Өз ауданыңыз + Enter" autocomplete="off" style="margin-top:7px">
+            </div>
+          </div>
+        </div>
+        <label class="field"><span data-i18n="query">Сұраныс</span>
+          <input type="text" id="genQuery" data-i18n-ph="query_ph" placeholder="Тере бастаңыз: Кафе, Дәріхана…" autocomplete="off" list="genQueryList">
+          <datalist id="genQueryList"></datalist>
+        </label>
+        <div class="field"><span data-i18n="rubric">Айдар (міндетті емес)</span>
+          <div class="msel" id="genRubWrap">
+            <button type="button" class="msel-btn" id="genRubBtn">Айдарсыз</button>
+            <div class="msel-panel" id="genRubPanel">
+              <input type="text" id="genRubricSearch" data-i18n-ph="rubric_search_ph" placeholder="Айдарды іздеу…" autocomplete="off">
+              <div class="genRubList" id="genRubList"></div>
+            </div>
+          </div>
+        </div>
+        <button type="button" class="btn-gen" id="genAdd">Сілтемелерді қосу</button>
+      </div>
+    </details>
+
+    <details class="sect" id="wa">
+      <summary data-i18n="wa_title">💬 WhatsApp-тарату</summary>
+      <div class="sectbody">
+        <label class="field"><span data-i18n="wa_mode_label">Қайда ашу</span>
+          <select id="waMode">
+            <option value="web" data-i18n="wa_web">WhatsApp Web (браузерде)</option>
+            <option value="app" data-i18n="wa_app">Қосымша / телефон (wa.me)</option>
+          </select></label>
+        <div class="field"><span data-i18n="wa_templates">Хабарлама үлгілері</span>
+          <div id="waList" class="waList"></div>
+          <button type="button" class="btn-add" id="waAdd" data-i18n="wa_add">+ Үлгі қосу</button>
+        </div>
+        <div class="hint" data-i18n="wa_hint">Карточкадағы «WhatsApp» басқанда чат кездейсоқ үлгімен ашылады. Бірнеше үлгі → әр мекемеге өз нұсқасы.</div>
+      </div>
+    </details>
+
+    <details class="sect" id="filt">
+      <summary data-i18n="filters_title">🧹 Сүзгілер</summary>
+      <div class="sectbody">
+        <label class="check"><input type="checkbox" id="f_dedup_niches" checked> <span data-i18n="f_dedup_niches">Ниша аралық қайталанусыз (1 мекеме — 1 рет)</span></label>
+        <label class="check"><input type="checkbox" id="f_dedup"> <span data-i18n="f_dedup">Франшизасыз (ұйымға 1)</span></label>
+        <label class="check"><input type="checkbox" id="f_phone"> <span data-i18n="f_phone">Тек телефоны барлар</span></label>
+        <label class="check"><input type="checkbox" id="f_wa"> <span data-i18n="f_wa">Тек WhatsApp барлар</span></label>
+        <label class="check"><input type="checkbox" id="f_social"> <span data-i18n="f_social">Тек әлеуметтік желілермен</span></label>
+        <label class="check"><input type="checkbox" id="f_email"> <span data-i18n="f_email">Тек e-mail барлар</span></label>
+        <label class="check"><input type="checkbox" id="f_site"> <span data-i18n="f_site">Тек сайты барлар</span></label>
+        <div class="rowmini">
+          <label class="field"><span data-i18n="rating_from">Рейтинг (бастап)</span><input type="number" id="f_rating" min="0" max="5" step="0.1" value="0"></label>
+          <label class="field"><span data-i18n="reviews_from">Пікірлер (бастап)</span><input type="number" id="f_reviews" min="0" step="1" value="0"></label>
+        </div>
+      </div>
+    </details>
+
+    <details class="sect" id="params">
+      <summary data-i18n="params_title">📋 Параметрлер</summary>
+      <div class="sectbody">
+        <label class="field"><span data-i18n="maxrec">Бір URL-ден макс. жазба</span><input type="number" id="maxrec" min="1" step="1" value="50"></label>
+        <label class="check"><input type="checkbox" id="clean" checked> <span data-i18n="clean">Таза көрініс (қоқыссыз)</span></label>
+        <label class="check"><input type="checkbox" id="headless" checked> <span data-i18n="headless">Жасырын браузер (headless)</span></label>
+      </div>
+    </details>
+
+    <details class="sect" id="adv">
+      <summary data-i18n="adv_title">⚙️ Қосымша баптаулар</summary>
+      <div class="sectbody">
+        <label class="check"><input type="checkbox" id="a_images" checked> <span data-i18n="a_images">Суреттерді өшіру (жылдамырақ)</span></label>
+        <label class="check"><input type="checkbox" id="a_max"> <span data-i18n="a_max">Браузерді жайып ашу</span></label>
+        <label class="check"><input type="checkbox" id="a_skip404" checked> <span data-i18n="a_skip404">Дәл сәйкестіктер («табылмады» өткізу)</span></label>
+        <label class="check"><input type="checkbox" id="a_rubrics" checked> <span data-i18n="a_rubrics">«Айдарлар» бағаны</span></label>
+        <label class="check"><input type="checkbox" id="a_comments" checked> <span data-i18n="a_comments">Ұяшықтардағы түсініктемелер (жұмыс уақыты т.б.)</span></label>
+        <label class="check"><input type="checkbox" id="a_rmempty" checked> <span data-i18n="a_rmempty">Бос бағандарды жою</span></label>
+        <label class="check"><input type="checkbox" id="a_rmdup" checked> <span data-i18n="a_rmdup">Қайталануларды жою</span></label>
+        <div class="rowmini">
+          <label class="field"><span data-i18n="a_delay">Басу кідірісі, мс</span><input type="number" id="a_delay" min="0" step="50" value="0"></label>
+          <label class="field"><span data-i18n="a_cols">Өріске баған саны</span><input type="number" id="a_cols" min="1" max="5" value="3"></label>
+        </div>
+        <div class="rowmini">
+          <label class="field"><span data-i18n="a_mem">RAM шегі, МБ</span><input type="number" id="a_mem" min="512" step="512" placeholder="авто"></label>
+          <label class="field"><span data-i18n="a_enc">Кодтау</span><select id="a_enc">
+            <option value="utf-8-sig">UTF-8 (Excel)</option><option value="utf-8">UTF-8</option>
+            <option value="cp1251">Windows-1251</option></select></label>
+        </div>
+      </div>
+    </details>
+
+    <details class="sect" id="hist">
+      <summary data-i18n="hist_title">🕘 Парсинг тарихы</summary>
+      <div class="sectbody">
+        <div id="histList" class="histList"><div class="hint" data-i18n="hist_empty">Әзірге бос. Аяқталған парсингтер осында сақталады.</div></div>
+      </div>
+    </details>
+
+    <div class="actions-bar">
+      <button class="btn-run" id="run" data-i18n="run">Бастау</button>
+      <button class="btn-stop" id="stop" style="display:none" data-i18n="stop">Тоқтату</button>
+    </div>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <span class="pill" id="pill"><span class="dot"></span><span id="pilltext">Дайын</span></span>
+      <span id="count"></span>
+      <input id="search" type="search" data-i18n-ph="search_ph" placeholder="Нәтижелерден іздеу…" autocomplete="off">
+      <select id="sort" class="sortsel" data-i18n-title="sort_title" title="Сұрыптау">
+        <option value="default" data-i18n="sort_default">Сұрыптаусыз</option>
+        <option value="name_asc" data-i18n="sort_name_asc">Атауы А–Я</option>
+        <option value="name_desc" data-i18n="sort_name_desc">Атауы Я–А</option>
+        <option value="rating_desc" data-i18n="sort_rating_desc">Рейтинг ↓</option>
+        <option value="rating_asc" data-i18n="sort_rating_asc">Рейтинг ↑</option>
+        <option value="reviews_desc" data-i18n="sort_reviews_desc">Пікірлер ↓</option>
+        <option value="reviews_asc" data-i18n="sort_reviews_asc">Пікірлер ↑</option>
+        <option value="rubric_asc" data-i18n="sort_rubric">Айдар бойынша А–Я</option>
+      </select>
+      <div class="viewbtns" id="viewbtns">
+        <button data-cols="1" title="1 колонка"><svg width="16" height="16" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="2" fill="currentColor"/></svg></button>
+        <button data-cols="2" title="2 колонки"><svg width="16" height="16" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="12" rx="1.5" fill="currentColor"/><rect x="9" y="2" width="5" height="12" rx="1.5" fill="currentColor"/></svg></button>
+        <button data-cols="3" title="3 колонки"><svg width="16" height="16" viewBox="0 0 16 16"><rect x="1.5" y="2" width="3.2" height="12" rx="1" fill="currentColor"/><rect x="6.4" y="2" width="3.2" height="12" rx="1" fill="currentColor"/><rect x="11.3" y="2" width="3.2" height="12" rx="1" fill="currentColor"/></svg></button>
+      </div>
+      <div class="dl" id="dlbar">
+        <span class="dl-label" data-i18n="dl_label">Жүктеу:</span>
+        <button class="dl-fmt" data-fmt="html" disabled>HTML</button>
+        <button class="dl-fmt" data-fmt="csv" disabled>CSV</button>
+        <button class="dl-fmt" data-fmt="xlsx" disabled>XLSX</button>
+        <button class="dl-fmt" data-fmt="json" disabled>JSON</button>
+      </div>
+      <button class="btn-clear" id="clear" data-i18n="clear" data-i18n-title="clear_title" title="Нәтижелерді тазалау (Тарихта қалады)" disabled>✕ Тазалау</button>
+    </div>
+    <div class="content">
+      <details class="log" id="logwrap" style="display:none">
+        <summary data-i18n="log_title">Парсинг журналы</summary>
+        <div id="logbox"></div>
+      </details>
+      <div class="grid" id="grid"></div>
+      <div class="empty" id="empty"><div class="big">🔎</div><span data-i18n="empty_start">Сол жақта сілтемелерді көрсетіп, «Бастау» басыңыз.</span></div>
+    </div>
+  </main>
+</div>
+
+<script>
+(function(){
+  var $=function(id){return document.getElementById(id)};
+  var poll=null, cursor=0, records=[], histId=null;
+
+  // ---- i18n (Қазақша default, Русский) ----
+  var T={
+    kk:{
+      urls_label:'Сілтемелер', urls_hint:'Әр жолда бір 2GIS сілтемесі. Бірнеше қала және айдар болуы мүмкін.',
+      gen_title:'🔗 Сілтеме жасау', country:'Ел', cities:'Қалалар', select_all:'барлығын таңдау', reset:'тазалау',
+      district:'Аудан (міндетті емес)', no_district:'Аудансыз', district_sel:'Таңдалған аудан: ',
+      district_custom_ph:'Өз ауданыңыз + Enter', dist_pick_city:'Алдымен қаланы таңдаңыз.',
+      query:'Сұраныс', query_ph:'Тере бастаңыз: Кафе, Дәріхана…', rubric:'Айдар (міндетті емес)',
+      rubric_search_ph:'Айдарды іздеу…', wa_title:'💬 WhatsApp-тарату', wa_mode_label:'Қайда ашу',
+      wa_web:'WhatsApp Web (браузерде)', wa_app:'Қосымша / телефон (wa.me)', wa_templates:'Хабарлама үлгілері',
+      wa_add:'+ Үлгі қосу', wa_hint:'Карточкадағы «WhatsApp» басқанда чат кездейсоқ үлгімен ашылады. Бірнеше үлгі → әр мекемеге өз нұсқасы.',
+      filters_title:'🧹 Сүзгілер', f_dedup_niches:'Ниша аралық қайталанусыз (1 мекеме — 1 рет)', f_dedup:'Франшизасыз (ұйымға 1)', f_phone:'Тек телефоны барлар',
+      f_wa:'Тек WhatsApp барлар', f_social:'Тек әлеуметтік желілермен', f_email:'Тек e-mail барлар',
+      f_site:'Тек сайты барлар', rating_from:'Рейтинг (бастап)', reviews_from:'Пікірлер (бастап)',
+      params_title:'📋 Параметрлер', maxrec:'Бір URL-ден макс. жазба', clean:'Таза көрініс (қоқыссыз)',
+      headless:'Жасырын браузер (headless)', adv_title:'⚙️ Қосымша баптаулар', a_images:'Суреттерді өшіру (жылдамырақ)',
+      a_max:'Браузерді жайып ашу', a_skip404:'Дәл сәйкестіктер («табылмады» өткізу)', a_rubrics:'«Айдарлар» бағаны',
+      a_comments:'Ұяшықтардағы түсініктемелер (жұмыс уақыты т.б.)', a_rmempty:'Бос бағандарды жою',
+      a_rmdup:'Қайталануларды жою', a_delay:'Басу кідірісі, мс', a_cols:'Өріске баған саны', a_mem:'RAM шегі, МБ',
+      a_enc:'Кодтау', hist_title:'🕘 Парсинг тарихы', hist_empty:'Әзірге бос. Аяқталған парсингтер осында сақталады.',
+      run:'Бастау', stop:'Тоқтату', search_ph:'Нәтижелерден іздеу…', sort_title:'Сұрыптау', sort_default:'Сұрыптаусыз',
+      sort_name_asc:'Атауы А–Я', sort_name_desc:'Атауы Я–А', sort_rating_desc:'Рейтинг ↓', sort_rating_asc:'Рейтинг ↑',
+      sort_reviews_desc:'Пікірлер ↓', sort_reviews_asc:'Пікірлер ↑', sort_rubric:'Айдар бойынша А–Я',
+      dl_label:'Жүктеу:', clear:'✕ Тазалау', clear_title:'Нәтижелерді тазалау (Тарихта қалады)',
+      log_title:'Парсинг журналы', empty_start:'Сол жақта сілтемелерді көрсетіп, «Бастау» басыңыз.',
+      cities_btn:'Қалаларды таңдаңыз', cities_sel:'Таңдалған қала: ', no_cities:'қала жоқ', no_rubric:'Айдарсыз',
+      no_rubric_opt:'— айдарсыз —', add_links:'Сілтемелерді қосу', added:'Қосылды: ', wa_tpl_ph:'Хабарлама мәтіні…',
+      found:'табылды', collected:'жиналды…', from_history:'(тарихтан)', merged:'(біріктірілді, дубльдер жойылды)',
+      collecting:'Деректер жиналуда…', empty_notfound:'Сұраныс бойынша ештеңе табылмады.',
+      st_ready:'Дайын', st_running:'Парсинг жүруде…', st_done:'Дайын', st_stopped:'Тоқтатылды', st_error:'Қате',
+      mark:'Хабарластық', mark_on:'✓ Хабарластық', note_ph:'Ескертпе…', hist_open:'Ашу',
+      hist_merge:'⛁ Таңдалғанды біріктіру (дедуп)', recs_short:'жзб.', more:'тағы',
+      a_need_url:'Кемінде бір 2GIS сілтемесін көрсетіңіз', a_need_query:'Сұранысты енгізіңіз',
+      a_need_city:'Кемінде бір қаланы таңдаңыз', a_server:'Сервер қолжетімсіз: ', a_start_err:'Іске қосу қатесі',
+      a_need_select:'Біріктіру үшін жазбаларды белгілеңіз', a_merge_err:'Біріктіру қатесі',
+      c_del:'Бұл жазбаны тарихтан жою керек пе?'
+    },
+    ru:{
+      urls_label:'Направления', urls_hint:'По одной ссылке 2GIS на строку. Можно несколько городов и рубрик.',
+      gen_title:'🔗 Создать ссылки', country:'Страна', cities:'Города', select_all:'выбрать все', reset:'сбросить',
+      district:'Район (необязательно)', no_district:'Без района', district_sel:'Выбрано районов: ',
+      district_custom_ph:'Свой район + Enter', dist_pick_city:'Сначала выберите город.',
+      query:'Запрос', query_ph:'Начните печатать: Кафе, Аптеки…', rubric:'Рубрика (необязательно)',
+      rubric_search_ph:'Поиск рубрики…', wa_title:'💬 WhatsApp-рассылка', wa_mode_label:'Открывать в',
+      wa_web:'WhatsApp Web (в браузере)', wa_app:'Приложение / телефон (wa.me)', wa_templates:'Шаблоны сообщений',
+      wa_add:'+ Добавить шаблон', wa_hint:'При клике на «WhatsApp» в карточке откроется чат с подставленным случайным шаблоном. Несколько шаблонов → каждому заведению свой вариант.',
+      filters_title:'🧹 Фильтры', f_dedup_niches:'Без повторов между нишами (1 заведение — 1 раз)', f_dedup:'Без франшиз (1 на организацию)', f_phone:'Только с телефоном',
+      f_wa:'Только с WhatsApp', f_social:'Только с соцсетями', f_email:'Только с e-mail', f_site:'Только с сайтом',
+      rating_from:'Рейтинг от', reviews_from:'Отзывов от', params_title:'📋 Параметры',
+      maxrec:'Макс. записей с одного URL', clean:'Чистый вид (без мусора)', headless:'Скрытый браузер (headless)',
+      adv_title:'⚙️ Расширенные настройки', a_images:'Отключить изображения (быстрее)', a_max:'Запускать браузер развёрнутым',
+      a_skip404:'Точные совпадения (пропуск «не найдено»)', a_rubrics:'Колонка «Рубрики»',
+      a_comments:'Комментарии в ячейках (часы работы и т.д.)', a_rmempty:'Удалять пустые колонки',
+      a_rmdup:'Удалять дубликаты', a_delay:'Задержка кликов, мс', a_cols:'Колонок на поле', a_mem:'Лимит RAM, МБ',
+      a_enc:'Кодировка', hist_title:'🕘 История парсинга', hist_empty:'Пока пусто. Завершённые парсинги сохранятся здесь.',
+      run:'Запустить', stop:'Остановить', search_ph:'Поиск в результатах…', sort_title:'Сортировка', sort_default:'Без сортировки',
+      sort_name_asc:'Название А–Я', sort_name_desc:'Название Я–А', sort_rating_desc:'Рейтинг ↓', sort_rating_asc:'Рейтинг ↑',
+      sort_reviews_desc:'Отзывов ↓', sort_reviews_asc:'Отзывов ↑', sort_rubric:'По рубрике А–Я',
+      dl_label:'Скачать:', clear:'✕ Очистить', clear_title:'Очистить результаты (останутся в Истории)',
+      log_title:'Журнал парсинга', empty_start:'Укажите направления слева и нажмите «Запустить».',
+      cities_btn:'Выберите города', cities_sel:'Выбрано городов: ', no_cities:'нет городов', no_rubric:'Без рубрики',
+      no_rubric_opt:'— без рубрики —', add_links:'Добавить ссылки', added:'Добавлено: ', wa_tpl_ph:'Текст сообщения…',
+      found:'найдено', collected:'собрано…', from_history:'(из истории)', merged:'(объединено, дубли убраны)',
+      collecting:'Собираем данные…', empty_notfound:'Ничего не найдено по запросу.',
+      st_ready:'Готов', st_running:'Идёт парсинг…', st_done:'Готово', st_stopped:'Остановлено', st_error:'Ошибка',
+      mark:'Связались', mark_on:'✓ Связались', note_ph:'Заметка…', hist_open:'Открыть',
+      hist_merge:'⛁ Объединить выбранные (дедуп)', recs_short:'зап.', more:'ещё',
+      a_need_url:'Укажите хотя бы одну ссылку 2GIS', a_need_query:'Введите запрос',
+      a_need_city:'Выберите хотя бы один город', a_server:'Сервер недоступен: ', a_start_err:'Ошибка запуска',
+      a_need_select:'Отметьте галочками записи для объединения', a_merge_err:'Ошибка объединения',
+      c_del:'Удалить эту запись из истории?'
+    }
+  };
+  var LANG='kk', lastStatus='idle';
+  function t(k){return (T[LANG]&&T[LANG][k]!=null)?T[LANG][k]:(T.kk[k]!=null?T.kk[k]:k);}
+  function applyLang(lang){
+    LANG=(lang==='ru')?'ru':'kk'; var d=T[LANG];
+    [].forEach.call(document.querySelectorAll('[data-i18n]'),function(el){var k=el.getAttribute('data-i18n'); if(d[k]!=null)el.textContent=d[k];});
+    [].forEach.call(document.querySelectorAll('[data-i18n-ph]'),function(el){var k=el.getAttribute('data-i18n-ph'); if(d[k]!=null)el.setAttribute('placeholder',d[k]);});
+    [].forEach.call(document.querySelectorAll('[data-i18n-title]'),function(el){var k=el.getAttribute('data-i18n-title'); if(d[k]!=null)el.setAttribute('title',d[k]);});
+    [].forEach.call(document.querySelectorAll('.waTpl'),function(i){i.setAttribute('placeholder',d.wa_tpl_ph);});
+    [].forEach.call(document.querySelectorAll('.note'),function(i){i.setAttribute('placeholder',d.note_ph);});
+    document.documentElement.lang=LANG;
+    [].forEach.call($('langbtns').querySelectorAll('button'),function(b){b.classList.toggle('on',b.getAttribute('data-lang')===LANG);});
+    if(typeof updateCitiesLabel==='function')updateCitiesLabel();
+    if(GEN&&GEN.loaded){renderGenCities();renderGenDists();renderGenRubrics();renderGenQueryList();
+      $('genRubBtn').textContent=GEN.rubCode?GEN.rubLabel:t('no_rubric');}
+    setStatus(lastStatus); loadHistory(); renderGrid();
+    try{localStorage.setItem('lang',LANG);}catch(_){}
+  }
+  $('langbtns').addEventListener('click',function(e){var b=e.target.closest('button'); if(b)applyLang(b.getAttribute('data-lang'));});
+
+  function esc(s){return (s==null?'':String(s)).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+  function digits(s){return (s||'').replace(/\D/g,'');}
+
+  function payload(){
+    // District labels for the URLs currently in the textarea (from the generator).
+    var directions=$('urls').value.split('\n').map(function(s){return s.trim();})
+      .filter(Boolean).filter(function(u){return LINKMETA[u];})
+      .map(function(u){return {url:u,label:LINKMETA[u]};});
+    return {
+      urls: $('urls').value.split('\n'),
+      directions: directions,
+      max_records: parseInt($('maxrec').value||'50',10),
+      headless: $('headless').checked,
+      clean: $('clean').checked,
+      filters: {
+        dedup_across_niches:$('f_dedup_niches').checked, dedup_franchises:$('f_dedup').checked, require_phone:$('f_phone').checked,
+        require_whatsapp:$('f_wa').checked, require_social:$('f_social').checked,
+        require_email:$('f_email').checked, require_website:$('f_site').checked,
+        min_rating:parseFloat($('f_rating').value||'0'), min_reviews:parseInt($('f_reviews').value||'0',10)
+      },
+      advanced: {
+        disable_images:$('a_images').checked, start_maximized:$('a_max').checked,
+        skip_404_response:$('a_skip404').checked, add_rubrics:$('a_rubrics').checked,
+        add_comments:$('a_comments').checked, remove_empty_columns:$('a_rmempty').checked,
+        remove_duplicates:$('a_rmdup').checked, delay_between_clicks:parseInt($('a_delay').value||'0',10),
+        columns_per_entity:parseInt($('a_cols').value||'3',10),
+        memory_limit:parseInt($('a_mem').value||'0',10), encoding:$('a_enc').value
+      }
+    };
+  }
+
+  function setStatus(s){
+    lastStatus=s; var pill=$('pill'), tx=$('pilltext');
+    pill.className='pill'; var map={running:['run','st_running'],done:['done','st_done'],
+      stopped:['stop','st_stopped'],error:['err','st_error'],idle:['','st_ready']};
+    var m=map[s]||map.idle; if(m[0])pill.classList.add(m[0]); tx.textContent=t(m[1]);
+  }
+
+  function waTemplates(){
+    return [].map.call($('waList').querySelectorAll('.waTpl'),function(i){return i.value.trim();}).filter(Boolean);
+  }
+  function waValues(){
+    return [].map.call($('waList').querySelectorAll('.waTpl'),function(i){return i.value;});
+  }
+  function saveWa(){try{localStorage.setItem('wa_texts_v2',JSON.stringify(waValues()));}catch(_){}}
+  function addWaRow(value){
+    var row=document.createElement('div'); row.className='waRow';
+    row.innerHTML='<input type="text" class="waTpl" placeholder="'+t('wa_tpl_ph')+'">'+
+      '<button type="button" class="waDel" title="Удалить">&times;</button>';
+    $('waList').appendChild(row);
+    row.querySelector('.waTpl').value=value||'';
+  }
+  function waUrl(number){
+    var tpls=waTemplates();
+    var text=tpls.length?tpls[Math.floor(Math.random()*tpls.length)]:'';
+    if($('waMode').value==='web'){
+      return 'https://web.whatsapp.com/send?phone='+number+(text?('&text='+encodeURIComponent(text)):'');
+    }
+    return 'https://wa.me/'+number+(text?('?text='+encodeURIComponent(text)):'');
+  }
+
+  // Per-business contacted status + notes (persisted, keyed by 2GIS firm id).
+  var CONTACTS={}; try{CONTACTS=JSON.parse(localStorage.getItem('p2gis_contacts')||'{}');}catch(_){CONTACTS={};}
+  function saveContacts(){try{localStorage.setItem('p2gis_contacts',JSON.stringify(CONTACTS));}catch(_){}}
+  function bizId(r){var u=r.url||''; var m=u.split('/firm/')[1]; return m||u;}
+
+  function renderCard(r){
+    var c=r.contacts||{}, b=[];
+    if(c.whatsapp) b.push('<a class="b wa" href="#" data-wa="'+esc(digits(c.whatsapp))+'">WhatsApp</a>');
+    if(c.phone) b.push('<a class="b" href="tel:'+digits(c.phone)+'">📞 '+esc(c.phone)+'</a>');
+    if(c.telegram) b.push('<a class="b tg" target="_blank" rel="noopener" href="'+esc(c.telegram)+'">Telegram</a>');
+    if(c.instagram) b.push('<a class="b ig" target="_blank" rel="noopener" href="'+esc(c.instagram)+'">Instagram</a>');
+    if(c.website) b.push('<a class="b" target="_blank" rel="noopener" href="'+esc(c.website)+'">🌐 Сайт</a>');
+    if(c.email) b.push('<a class="b" href="mailto:'+esc(c.email)+'">✉️ E-mail</a>');
+    if(r.url) b.push('<a class="b gis" target="_blank" rel="noopener" href="'+esc(r.url)+'">2GIS</a>');
+    var rating=''; if(r.rating){var rv=r.review_count?(' · '+r.review_count+' отз.'):''; rating='<span class="rating">★ '+esc(r.rating)+esc(rv)+'</span>';}
+    var rub=r.rubrics&&r.rubrics.length?'<div class="rubrics">'+esc(r.rubrics.join(' · '))+'</div>':'';
+    var meta=[]; if(r.address)meta.push(esc(r.address)); if(r.city)meta.push(esc(r.city));
+    var blob=((r.name||'')+' '+(r.address||'')+' '+(r.city||'')+' '+((r.rubrics||[]).join(' '))+' '+(c.phone||'')).toLowerCase();
+    var id=bizId(r), st=CONTACTS[id]||{}, done=st.status==='contacted';
+    var foot='<div class="cardfoot">'+
+      '<button class="markbtn'+(done?' on':'')+'" data-id="'+esc(id)+'">'+t(done?'mark_on':'mark')+'</button>'+
+      '<input class="note" data-id="'+esc(id)+'" placeholder="'+t('note_ph')+'" value="'+esc(st.note||'')+'"></div>';
+    return '<article class="card'+(done?' done':'')+'" data-s="'+esc(blob)+'">'+
+      '<div class="card-head"><h2>'+esc(r.name)+'</h2>'+rating+'</div>'+rub+
+      (meta.length?'<div class="meta">'+meta.join(', ')+'</div>':'')+
+      '<div class="acts">'+b.join('')+'</div>'+foot+'</article>';
+  }
+
+  function sortRecords(arr){
+    var s=$('sort').value;
+    if(s==='default')return arr;
+    var name=function(r){return (r.name||'').toLowerCase();};
+    var rub=function(r){return ((r.rubrics&&r.rubrics[0])||'').toLowerCase();};
+    var num=function(v){return (typeof v==='number')?v:-1;};
+    var a=arr.slice();
+    if(s==='name_asc')a.sort(function(x,y){return name(x).localeCompare(name(y),'ru');});
+    else if(s==='name_desc')a.sort(function(x,y){return name(y).localeCompare(name(x),'ru');});
+    else if(s==='rating_desc')a.sort(function(x,y){return num(y.rating)-num(x.rating);});
+    else if(s==='rating_asc')a.sort(function(x,y){return num(x.rating)-num(y.rating);});
+    else if(s==='reviews_desc')a.sort(function(x,y){return num(y.review_count)-num(x.review_count);});
+    else if(s==='reviews_asc')a.sort(function(x,y){return num(x.review_count)-num(y.review_count);});
+    else if(s==='rubric_asc')a.sort(function(x,y){return rub(x).localeCompare(rub(y),'ru') || name(x).localeCompare(name(y),'ru');});
+    return a;
+  }
+  function renderGrid(){
+    var term=$('search').value.trim().toLowerCase();
+    var grid=$('grid'), empty=$('empty');
+    var list=sortRecords(records);
+    var html='', shown=0;
+    for(var i=0;i<list.length;i++){
+      var r=list[i];
+      var blob=((r.name||'')+' '+(r.address||'')+' '+(r.city||'')+' '+((r.rubrics||[]).join(' '))).toLowerCase();
+      if(term && blob.indexOf(term)<0) continue;
+      html+=renderCard(r); shown++;
+    }
+    grid.innerHTML=html;
+    if(records.length===0){empty.style.display='block';
+      empty.innerHTML='<div class="big">🔎</div>'+(lastStatus==='running'?t('collecting'):t('empty_start'));}
+    else if(shown===0){empty.style.display='block';empty.innerHTML='<div class="big">∅</div>'+t('empty_notfound');}
+    else empty.style.display='none';
+    $('count').textContent=records.length?(records.length+' '+t('found')):'';
+  }
+
+  function tick(){
+    fetch('/api/status?cursor='+cursor).then(function(r){return r.json()}).then(function(d){
+      cursor=d.cursor;
+      if(d.logs && d.logs.length){var lb=$('logbox'); lb.textContent+=(lb.textContent?'\n':'')+d.logs.join('\n'); lb.scrollTop=lb.scrollHeight;}
+      $('count').textContent=d.count?(d.count+' '+(d.running?t('collected'):t('found'))):'';
+      setStatus(d.status);
+      if(!d.running){
+        clearInterval(poll); poll=null;
+        $('run').style.display=''; $('stop').style.display='none';
+        fetch('/api/results').then(function(r){return r.json()}).then(function(res){
+          records=res.records||[]; histId=null; renderGrid(); dlEnabled(records.length>0);
+          loadHistory();
+        });
+      }
+    }).catch(function(){});
+  }
+
+  function clearUrlsEmpty(){
+    var ta=$('urls'); ta.classList.remove('invalid','shake');
+    var h=$('urlsHint'); if(h){h.classList.remove('err'); h.textContent=t('urls_hint');}
+  }
+  function flagUrlsEmpty(){
+    var ta=$('urls');
+    var h=$('urlsHint'); if(h){h.classList.add('err'); h.textContent=t('a_need_url');}
+    ta.classList.remove('shake'); void ta.offsetWidth;  // restart shake on repeat clicks
+    ta.classList.add('invalid','shake');
+    ta.scrollIntoView({behavior:'smooth',block:'center'});
+    ta.focus();
+  }
+  $('urls').addEventListener('input',clearUrlsEmpty);  // clear on typing, not on focus
+
+  $('run').addEventListener('click',function(){
+    var p=payload();
+    if(!p.urls.filter(function(u){return u.trim()}).length){flagUrlsEmpty();return;}
+    $('logbox').textContent=''; $('logwrap').style.display=''; $('logwrap').open=true;
+    dlEnabled(false); records=[]; histId=null; renderGrid(); cursor=0;
+    fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)})
+      .then(function(r){return r.json()}).then(function(d){
+        if(!d.ok){alert(d.error||t('a_start_err'));return;}
+        $('run').style.display='none'; $('stop').style.display=''; setStatus('running');
+        if(poll)clearInterval(poll); poll=setInterval(tick,700); tick();
+      }).catch(function(e){alert(t('a_server')+e)});
+  });
+
+  $('stop').addEventListener('click',function(){
+    $('stop').disabled=true;
+    fetch('/api/stop',{method:'POST'}).finally(function(){setTimeout(function(){$('stop').disabled=false},800)});
+  });
+
+  function dlEnabled(on){
+    [].forEach.call(document.querySelectorAll('.dl-fmt'),function(b){b.disabled=!on;});
+    $('clear').disabled=!on;
+  }
+  $('dlbar').addEventListener('click',function(e){
+    var b=e.target.closest('.dl-fmt'); if(!b||b.disabled)return;
+    var base=histId?('/api/history/'+histId+'/download'):'/api/download';
+    window.location=base+'?format='+encodeURIComponent(b.getAttribute('data-fmt'));
+  });
+  $('clear').addEventListener('click',function(){
+    if($('clear').disabled)return;
+    if(!histId){fetch('/api/clear',{method:'POST'}).catch(function(){});}
+    records=[]; histId=null; renderGrid(); dlEnabled(false);
+    $('count').textContent=''; $('search').value='';
+  });
+
+  // ---- Parse history ----
+  function fmtDate(iso){return iso?iso.replace('T',' ').slice(0,16):'';}
+  function urlsSummary(urls){
+    if(!urls||!urls.length)return '';
+    var u=urls[0].replace(/^https?:\/\//,'');
+    try{u=decodeURIComponent(u);}catch(_){}
+    return u+(urls.length>1?(' +'+(urls.length-1)+' '+t('more')):'');
+  }
+  function renderHistory(items){
+    var el=$('histList');
+    if(!items.length){el.innerHTML='<div class="hint">'+t('hist_empty')+'</div>';return;}
+    var bar=items.length>1?'<div class="histbar"><button id="histMerge">'+t('hist_merge')+'</button></div>':'';
+    el.innerHTML=bar+items.map(function(it){
+      return '<div class="histItem">'+
+        '<div class="hh"><label class="hsel"><input type="checkbox" class="hcheck" data-id="'+esc(it.id)+'"> '+
+          esc(fmtDate(it.created_at))+' · '+it.count+' '+t('recs_short')+'</label>'+
+        '<button class="hdel" title="✕" data-del="'+esc(it.id)+'">×</button></div>'+
+        '<div class="hu">'+esc(urlsSummary(it.urls))+'</div>'+
+        '<div class="hb"><button class="hbtn open" data-open="'+esc(it.id)+'">'+t('hist_open')+'</button>'+
+        '<button class="hbtn" data-dl="'+esc(it.id)+'" data-fmt="html">HTML</button>'+
+        '<button class="hbtn" data-dl="'+esc(it.id)+'" data-fmt="xlsx">XLSX</button>'+
+        '<button class="hbtn" data-dl="'+esc(it.id)+'" data-fmt="csv">CSV</button></div></div>';
+    }).join('');
+  }
+  function loadHistory(){
+    fetch('/api/history').then(function(r){return r.json()})
+      .then(function(d){renderHistory(d.items||[]);}).catch(function(){});
+  }
+  function openHist(id,key){
+    fetch('/api/history/'+id+'/results').then(function(r){return r.json()}).then(function(res){
+      records=res.records||[]; histId=id; renderGrid(); dlEnabled(records.length>0);
+      $('count').textContent=records.length+' '+t(key||'from_history');
+      var g=$('grid'); if(g.scrollIntoView)g.scrollIntoView({behavior:'smooth',block:'start'});
+    });
+  }
+  $('histList').addEventListener('click',function(e){
+    if(e.target.id==='histMerge'){
+      var ids=[].map.call($('histList').querySelectorAll('.hcheck:checked'),function(c){return c.getAttribute('data-id');});
+      if(!ids.length){alert(t('a_need_select'));return;}
+      fetch('/api/history/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:ids})})
+        .then(function(r){return r.json()}).then(function(d){
+          if(!d.ok){alert(d.error||t('a_merge_err'));return;}
+          loadHistory(); openHist(d.id,'merged');
+        }).catch(function(){alert(t('a_merge_err'));});
+      return;
+    }
+    var open=e.target.closest('[data-open]'), del=e.target.closest('[data-del]'), dl=e.target.closest('[data-dl]');
+    if(open){
+      openHist(open.getAttribute('data-open'));
+    } else if(dl){
+      window.location='/api/history/'+dl.getAttribute('data-dl')+'/download?format='+dl.getAttribute('data-fmt');
+    } else if(del){
+      if(confirm(t('c_del')))
+        fetch('/api/history/'+del.getAttribute('data-del'),{method:'DELETE'}).then(function(){loadHistory();});
+    }
+  });
+
+  $('search').addEventListener('input',renderGrid);
+  $('sort').addEventListener('change',renderGrid);
+
+  // Grid columns view (1 / 2 / 3 / auto)
+  function applyCols(c){
+    var g=$('grid'); g.classList.remove('cols-1','cols-2','cols-3');
+    if(c==='1'||c==='2'||c==='3')g.classList.add('cols-'+c);
+    [].forEach.call($('viewbtns').querySelectorAll('button'),function(b){
+      b.classList.toggle('on',b.getAttribute('data-cols')===c);});
+    try{localStorage.setItem('grid_cols',c);}catch(_){}
+  }
+  $('viewbtns').addEventListener('click',function(e){
+    var b=e.target.closest('button'); if(!b)return;
+    var c=b.getAttribute('data-cols');
+    applyCols($('grid').classList.contains('cols-'+c)?'auto':c);
+  });
+  (function(){var saved='auto'; try{saved=localStorage.getItem('grid_cols')||'auto';}catch(_){} applyCols(saved);})();
+
+  // WhatsApp button + "Связались" toggle.
+  $('grid').addEventListener('click',function(e){
+    var a=e.target.closest('.b.wa');
+    if(a){e.preventDefault(); var num=a.getAttribute('data-wa'); if(num)window.open(waUrl(num),'_blank','noopener'); return;}
+    var mark=e.target.closest('.markbtn');
+    if(mark){
+      var id=mark.getAttribute('data-id'), st=CONTACTS[id]||{};
+      st.status=(st.status==='contacted')?'':'contacted'; CONTACTS[id]=st; saveContacts();
+      var done=st.status==='contacted', card=mark.closest('.card');
+      if(card)card.classList.toggle('done',done);
+      mark.classList.toggle('on',done); mark.textContent=t(done?'mark_on':'mark');
+    }
+  });
+  // Per-card note input.
+  $('grid').addEventListener('input',function(e){
+    var n=e.target.closest('.note'); if(!n)return;
+    var id=n.getAttribute('data-id'), st=CONTACTS[id]||{};
+    st.note=n.value; CONTACTS[id]=st; saveContacts();
+  });
+  // Persist WhatsApp settings across reloads.
+  try{var sm=localStorage.getItem('wa_mode'); if(sm)$('waMode').value=sm;}catch(_){}
+  $('waMode').addEventListener('change',function(){try{localStorage.setItem('wa_mode',$('waMode').value);}catch(_){}});
+  (function initWaTemplates(){
+    var saved=[];
+    try{saved=JSON.parse(localStorage.getItem('wa_texts_v2')||'[]');}catch(_){}
+    if(!saved.length){try{var old=localStorage.getItem('wa_texts'); if(old)saved=old.split('\n');}catch(_){}}
+    if(!saved.length)saved=[''];
+    saved.forEach(function(v){addWaRow(v);});
+  })();
+  $('waAdd').addEventListener('click',function(){
+    addWaRow(''); var r=$('waList').querySelectorAll('.waTpl'); r[r.length-1].focus(); saveWa();});
+  $('waList').addEventListener('input',saveWa);
+  $('waList').addEventListener('click',function(e){
+    var d=e.target.closest('.waDel'); if(!d)return;
+    if($('waList').querySelectorAll('.waRow').length>1)d.closest('.waRow').remove();
+    else d.closest('.waRow').querySelector('.waTpl').value='';
+    saveWa();
+  });
+
+  // ---- Link generator ----
+  // Remembers the district each generated URL targets, so Excel export can put
+  // every district on its own sheet. Keyed by the exact URL string.
+  var LINKMETA={}; try{LINKMETA=JSON.parse(localStorage.getItem('p2gis_linkmeta')||'{}');}catch(_){LINKMETA={};}
+  function saveLinkMeta(){try{localStorage.setItem('p2gis_linkmeta',JSON.stringify(LINKMETA));}catch(_){}}
+  var GEN={cities:[],rubrics:[],districts:{},customDists:[],loaded:false,rubCode:'',rubLabel:''};
+  function isRu(){return $('genCountry').value==='ru';}
+  function renderGenCities(){
+    var cc=$('genCountry').value;
+    var list=GEN.cities.filter(function(c){return c.country_code===cc;});
+    $('genCities').innerHTML=list.length?list.map(function(c){
+      return '<label><input type="checkbox" data-code="'+esc(c.code)+'" data-domain="'+esc(c.domain)+'"> '+esc(c.name)+'</label>';
+    }).join(''):'<div class="hint">'+t('no_cities')+'</div>';
+    updateCitiesLabel();
+  }
+  function updateCitiesLabel(){
+    var n=$('genCities').querySelectorAll('input:checked').length;
+    $('genCitiesBtn').textContent=n?(t('cities_sel')+n):t('cities_btn');
+  }
+  // Cities currently checked in the generator: [{code, domain, name}].
+  function selectedGenCities(){
+    return [].map.call($('genCities').querySelectorAll('input:checked'),function(i){
+      return {code:i.getAttribute('data-code'),domain:i.getAttribute('data-domain'),
+        name:i.parentNode.textContent.trim()};
+    });
+  }
+  // Districts panel: curated districts grouped by the selected cities + custom ones.
+  function renderGenDists(){
+    var cities=selectedGenCities(), box=$('genDists'), html='';
+    var multi=cities.length>1;
+    // Preserve which curated districts were already checked across re-renders.
+    var wasChecked={};
+    [].forEach.call(box.querySelectorAll('input[data-city]:checked'),function(i){
+      wasChecked[i.getAttribute('data-city')+' '+i.getAttribute('data-name')]=1;});
+    cities.forEach(function(c){
+      var ds=GEN.districts[c.code]||[];
+      if(!ds.length)return;
+      if(multi)html+='<div class="distGroup">'+esc(c.name)+'</div>';
+      html+=ds.map(function(d){
+        var on=wasChecked[c.code+' '+d]?' checked':'';
+        return '<label><input type="checkbox" data-city="'+esc(c.code)+'" data-name="'+esc(d)+'"'+on+'> '+esc(d)+'</label>';
+      }).join('');
+    });
+    GEN.customDists.forEach(function(d){
+      html+='<label><input type="checkbox" data-custom="1" data-name="'+esc(d)+'" checked> '+esc(d)+
+        '<span class="dcustom" data-remove="'+esc(d)+'" title="✕">×</span></label>';
+    });
+    if(!html && !cities.length)html='<div class="genDistHint">'+t('dist_pick_city')+'</div>';
+    box.innerHTML=html;
+    updateDistLabel();
+  }
+  function updateDistLabel(){
+    var n=$('genDists').querySelectorAll('input:checked').length;
+    $('genDistBtn').textContent=n?(t('district_sel')+n):t('no_district');
+  }
+  function curRubrics(){var ru=isRu();return GEN.rubrics.filter(function(r){return ru?r.is_russian:r.is_non_russian;});}
+  function renderGenRubrics(){
+    var term=$('genRubricSearch').value.trim().toLowerCase();
+    var list=curRubrics();
+    if(term)list=list.filter(function(r){return r.label.toLowerCase().indexOf(term)>-1;});
+    list=list.slice(0,300);
+    var html='<div class="ri'+(GEN.rubCode?'':' sel')+'" data-code="">'+t('no_rubric_opt')+'</div>';
+    html+=list.map(function(r){
+      return '<div class="ri'+(GEN.rubCode===r.code?' sel':'')+'" data-code="'+esc(r.code)+'">'+esc(r.label)+'</div>';
+    }).join('');
+    $('genRubList').innerHTML=html;
+  }
+  function renderGenQueryList(){
+    // Suggestions shown while typing the query (native datalist autocomplete).
+    $('genQueryList').innerHTML=curRubrics().map(function(r){
+      return '<option value="'+esc(r.label)+'">';}).join('');
+  }
+  function loadGenerator(){
+    if(GEN.loaded)return;
+    fetch('/api/generator').then(function(r){return r.json()}).then(function(d){
+      GEN.cities=d.cities; GEN.rubrics=d.rubrics; GEN.districts=d.districts||{}; GEN.loaded=true;
+      $('genCountry').innerHTML=d.countries.map(function(c){
+        return '<option value="'+esc(c.code)+'"'+(c.code==='kz'?' selected':'')+'>'+esc(c.name)+'</option>';}).join('');
+      renderGenCities(); renderGenDists(); renderGenRubrics(); renderGenQueryList();
+    }).catch(function(){});
+  }
+  $('gen').addEventListener('toggle',function(){if($('gen').open)loadGenerator();});
+  function setRubric(code,label){
+    GEN.rubCode=code||''; GEN.rubLabel=code?label:'';
+    $('genRubBtn').textContent=code?label:t('no_rubric');
+  }
+  $('genCountry').addEventListener('change',function(){
+    setRubric('',''); $('genRubricSearch').value=''; GEN.customDists=[];
+    renderGenCities();renderGenDists();renderGenRubrics();renderGenQueryList();});
+  $('genRubricSearch').addEventListener('input',renderGenRubrics);
+  $('genRubList').addEventListener('click',function(e){
+    var ri=e.target.closest('.ri'); if(!ri)return;
+    var code=ri.getAttribute('data-code');
+    setRubric(code, ri.textContent);
+    if(code && !$('genQuery').value.trim())$('genQuery').value=ri.textContent;
+    renderGenRubrics();
+    $('genRubWrap').classList.remove('open');
+  });
+  // Dropdowns (cities / rubric): open one at a time, close on outside click.
+  function toggleMsel(wrap){
+    var willOpen=!wrap.classList.contains('open');
+    [].forEach.call(document.querySelectorAll('.msel.open'),function(m){m.classList.remove('open');});
+    if(willOpen)wrap.classList.add('open');
+  }
+  $('genCitiesBtn').addEventListener('click',function(e){e.stopPropagation();toggleMsel($('genCitiesWrap'));});
+  $('genRubBtn').addEventListener('click',function(e){e.stopPropagation();toggleMsel($('genRubWrap'));});
+  $('genDistBtn').addEventListener('click',function(e){e.stopPropagation();toggleMsel($('genDistWrap'));});
+  $('genCitiesPanel').addEventListener('click',function(e){e.stopPropagation();});
+  $('genRubPanel').addEventListener('click',function(e){e.stopPropagation();});
+  $('genDistPanel').addEventListener('click',function(e){e.stopPropagation();});
+  // District picker: label update, select-all/none, custom add + remove.
+  $('genDists').addEventListener('change',updateDistLabel);
+  $('genDists').addEventListener('click',function(e){
+    var rm=e.target.closest('[data-remove]'); if(!rm)return;
+    e.preventDefault();
+    var name=rm.getAttribute('data-remove');
+    GEN.customDists=GEN.customDists.filter(function(d){return d!==name;});
+    renderGenDists();
+  });
+  $('genDistAll').addEventListener('click',function(e){e.preventDefault();
+    [].forEach.call($('genDists').querySelectorAll('input'),function(i){i.checked=true;});updateDistLabel();});
+  $('genDistNone').addEventListener('click',function(e){e.preventDefault();
+    [].forEach.call($('genDists').querySelectorAll('input'),function(i){i.checked=false;});updateDistLabel();});
+  $('genDistCustom').addEventListener('keydown',function(e){
+    if(e.key!=='Enter')return;
+    e.preventDefault();
+    var v=this.value.trim(); if(!v)return;
+    if(GEN.customDists.indexOf(v)<0)GEN.customDists.push(v);
+    this.value=''; renderGenDists();
+  });
+  $('genCities').addEventListener('change',function(){updateCitiesLabel();renderGenDists();});
+  document.addEventListener('click',function(){[].forEach.call(document.querySelectorAll('.msel.open'),function(m){m.classList.remove('open');});});
+  $('genAll').addEventListener('click',function(e){e.preventDefault();
+    [].forEach.call($('genCities').querySelectorAll('input'),function(i){i.checked=true;});updateCitiesLabel();renderGenDists();});
+  $('genNone').addEventListener('click',function(e){e.preventDefault();
+    [].forEach.call($('genCities').querySelectorAll('input'),function(i){i.checked=false;});updateCitiesLabel();renderGenDists();});
+  $('genAdd').addEventListener('click',function(){
+    var q=$('genQuery').value.trim();
+    if(!q){alert(t('a_need_query'));return;}
+    var checked=$('genCities').querySelectorAll('input:checked');
+    if(!checked.length){alert(t('a_need_city'));return;}
+    var code=GEN.rubCode||'';
+    var existing=$('urls').value.split('\n').map(function(s){return s.trim();}).filter(Boolean);
+    var seen={}; existing.forEach(function(u){seen[u]=1;});
+    var added=0;
+    // Custom districts apply to every selected city; curated ones only to their own city.
+    var customChecked=[].map.call($('genDists').querySelectorAll('input[data-custom]:checked'),
+      function(i){return i.getAttribute('data-name');});
+    function build(domain,cityCode,district){
+      var query=district?(q+' '+district):q;
+      var url='https://2gis.'+domain+'/'+cityCode+
+        '/search/'+encodeURIComponent(query)+(code?'/rubricId/'+code:'')+'/filters/sort=name';
+      if(!seen[url]){existing.push(url);seen[url]=1;added++;}
+      if(district)LINKMETA[url]=district;  // tag for per-district Excel sheets
+    }
+    [].forEach.call(checked,function(i){
+      var cityCode=i.getAttribute('data-code'), domain=i.getAttribute('data-domain');
+      var dists=[].map.call(
+        $('genDists').querySelectorAll('input[data-city="'+cityCode+'"]:checked'),
+        function(d){return d.getAttribute('data-name');}
+      ).concat(customChecked);
+      if(!dists.length){build(domain,cityCode,'');}
+      else dists.forEach(function(d){build(domain,cityCode,d);});
+    });
+    $('urls').value=existing.join('\n');
+    saveLinkMeta();
+    var btn=$('genAdd'); btn.textContent=t('added')+added;
+    setTimeout(function(){btn.textContent=t('add_links');},1300);
+  });
+
+  // Restore state on load: preload generator data, show last results / resume a job.
+  (function init(){
+    var savedLang='kk'; try{savedLang=localStorage.getItem('lang')||'kk';}catch(_){}
+    applyLang(savedLang);
+    loadGenerator();
+    loadHistory();
+    fetch('/api/status?cursor=0').then(function(r){return r.json()}).then(function(d){
+      cursor=d.cursor; setStatus(d.status);
+      if(d.logs && d.logs.length){$('logwrap').style.display='';$('logbox').textContent=d.logs.join('\n');}
+      if(d.running){$('run').style.display='none';$('stop').style.display='';
+        if(poll)clearInterval(poll);poll=setInterval(tick,700);}
+      if(d.count){fetch('/api/results').then(function(r){return r.json()}).then(function(res){
+        records=res.records||[];renderGrid();dlEnabled(records.length>0);});}
+    }).catch(function(){});
+  })();
+})();
+</script>
+</body>
+</html>

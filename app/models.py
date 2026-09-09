@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -31,6 +31,17 @@ class Company(Base):
     address: Mapped[str | None] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(String(255))
     email: Mapped[str | None] = mapped_column(String(320), index=True)
+    region: Mapped[str | None] = mapped_column(String(255), index=True)
+    company_email: Mapped[str | None] = mapped_column(String(320), index=True)
+    company_phone: Mapped[str | None] = mapped_column(String(255))
+    branches_count: Mapped[int | None] = mapped_column(Integer)
+    decision_maker_name: Mapped[str | None] = mapped_column(String(255))
+    decision_maker_position: Mapped[str | None] = mapped_column(String(255))
+    decision_maker_email: Mapped[str | None] = mapped_column(String(320))
+    decision_maker_phone: Mapped[str | None] = mapped_column(String(255))
+    communication_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    action: Mapped[str | None] = mapped_column(Text)
+    result: Mapped[str | None] = mapped_column(Text)
     website: Mapped[str | None] = mapped_column(Text)
     inn: Mapped[str | None] = mapped_column(String(16))
     contact_person: Mapped[str | None] = mapped_column(String(255))
@@ -43,6 +54,8 @@ class Company(Base):
     website_domain: Mapped[str | None] = mapped_column(String(255))
     name_address_fingerprint: Mapped[str | None] = mapped_column(String(64))
     manually_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     __table_args__ = (
         Index("uq_company_source_external", "source", "source_external_id", unique=True),
@@ -51,6 +64,136 @@ class Company(Base):
         Index("uq_company_inn", "inn", unique=True),
         Index("uq_company_name_address", "name_address_fingerprint", unique=True),
     )
+
+
+class Direction(Base):
+    __tablename__ = "directions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    sheet_tab: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    limit_new: Mapped[int] = mapped_column(Integer, default=50)
+    schedule: Mapped[str | None] = mapped_column(String(100))
+    email_enrichment_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    ai_enrichment_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class DirectionSearchQuery(Base):
+    __tablename__ = "direction_search_queries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), index=True)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (UniqueConstraint("direction_id", "query", name="uq_direction_query"),)
+
+
+class DirectionLocation(Base):
+    __tablename__ = "direction_locations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), index=True)
+    city: Mapped[str] = mapped_column(String(255), nullable=False)
+    region: Mapped[str | None] = mapped_column(String(255))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    __table_args__ = (UniqueConstraint("direction_id", "city", "region", name="uq_direction_location"),)
+
+
+class DirectionSource(Base):
+    __tablename__ = "direction_sources"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), index=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    __table_args__ = (UniqueConstraint("direction_id", "source", name="uq_direction_source"),)
+
+
+class CompanyDirection(Base):
+    __tablename__ = "company_directions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (UniqueConstraint("company_id", "direction_id", name="uq_company_direction"),)
+
+
+class CompanySourceRecord(Base):
+    __tablename__ = "company_source_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_external_id: Mapped[str | None] = mapped_column(String(255))
+    source_url: Mapped[str | None] = mapped_column(Text)
+    query: Mapped[str | None] = mapped_column(String(255))
+    city: Mapped[str | None] = mapped_column(String(255))
+    raw_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("source", "source_external_id", name="uq_company_source_record_external"),
+    )
+
+
+class CompanyFieldProvenance(Base):
+    __tablename__ = "company_field_provenance"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    field: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    value: Mapped[str | None] = mapped_column(Text)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    discovery_method: Mapped[str] = mapped_column(String(64), nullable=False)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SheetRowMapping(Base):
+    __tablename__ = "sheet_row_mappings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), index=True)
+    spreadsheet_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    sheet_tab: Mapped[str] = mapped_column(String(100), nullable=False)
+    sheet_row: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "direction_id", "spreadsheet_id", name="uq_sheet_company_direction"),
+        UniqueConstraint("spreadsheet_id", "sheet_tab", "sheet_row", name="uq_sheet_row"),
+    )
+
+
+class DirectionRun(Base):
+    __tablename__ = "direction_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="running", index=True)
+    limit_new: Mapped[int] = mapped_column(Integer, nullable=False)
+    scanned: Mapped[int] = mapped_column(Integer, default=0)
+    inserted: Mapped[int] = mapped_column(Integer, default=0)
+    duplicates: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str | None] = mapped_column(Text)
+    checkpoint: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SourceJob(Base):

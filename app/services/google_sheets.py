@@ -1,77 +1,184 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 import gspread
 from google.oauth2.service_account import Credentials
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Company, EmailDelivery, GoogleSheetsConfig
-from app.services.secrets import decrypt_secret
+from app.models import Company, CompanyDirection, Direction, GoogleSheetsConfig, SheetRowMapping
+from app.config import Settings
+from app.services.provenance import apply_field
+from app.services.secrets import decrypt_secret, encrypt_secret
 
-HEADERS = [
-    "Дата добавления", "Направление", "Компания", "Город", "Адрес", "Email", "ИНН", "Сайт", "Телефон",
-    "Контактное лицо", "Источник", "Ссылка на источник", "Статус", "Дата отправки", "Шаблон",
-    "Почтовый аккаунт", "Открыто", "Клик", "Ответ", "Bounce", "Отписка",
-]
+COLUMNS: tuple[tuple[str, str], ...] = (
+    ("Начало общения / Дата", "communication_started_at"),
+    ("Наименование клиента", "company_name"),
+    ("Область", "region"),
+    ("Город", "city"),
+    ("Кол-во филиалов", "branches_count"),
+    ("Адрес", "address"),
+    ("Почта", "company_email"),
+    ("Телефон", "company_phone"),
+    ("ЛПР", "decision_maker_name"),
+    ("Почта", "decision_maker_email"),
+    ("Телефон", "decision_maker_phone"),
+    ("Действие", "action"),
+    ("Результат?", "result"),
+    ("LeadFlow ID", "id"),
+)
+HEADERS = [header for header, _ in COLUMNS]
+MANUAL_COLUMNS = {
+    0: "communication_started_at",
+    8: "decision_maker_name",
+    9: "decision_maker_email",
+    10: "decision_maker_phone",
+    11: "action",
+    12: "result",
+}
+
+
+def _text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def company_row(company: Company) -> list[str]:
+    return [_text(getattr(company, field_name)) for _, field_name in COLUMNS]
+
+
+def _parse_manual(field_name: str, value: str) -> Any:
+    if field_name == "communication_started_at":
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return value
+
+
+def worksheet_from_config(config: GoogleSheetsConfig, sheet_tab: str):
+    info = json.loads(decrypt_secret(config.credentials_encrypted))
+    credentials = Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    spreadsheet = gspread.authorize(credentials).open_by_key(config.spreadsheet_id)
+    try:
+        return spreadsheet.worksheet(sheet_tab)
+    except gspread.WorksheetNotFound:
+        return spreadsheet.add_worksheet(title=sheet_tab, rows=1000, cols=len(COLUMNS))
+
+
+def active_sheets_config(session: Session, settings: Settings) -> GoogleSheetsConfig | None:
+    config = session.scalar(select(GoogleSheetsConfig).where(GoogleSheetsConfig.active.is_(True)).limit(1))
+    if config or not settings.google_service_account_json:
+        return config
+    raw = settings.google_service_account_json
+    info = json.loads(raw) if raw.lstrip().startswith("{") else json.loads(Path(raw).read_text(encoding="utf-8"))
+    config = GoogleSheetsConfig(
+        spreadsheet_id=settings.google_sheets_spreadsheet_id,
+        worksheet_name="Directions",
+        credentials_encrypted=encrypt_secret(json.dumps(info)),
+        active=True,
+    )
+    session.add(config)
+    session.commit()
+    session.refresh(config)
+    return config
+
+
+class GoogleSheetsSyncService:
+    def __init__(self, session: Session, config: GoogleSheetsConfig):
+        self.session = session
+        self.config = config
+
+    def sync_direction(self, direction: Direction, *, worksheet=None) -> dict[str, int]:
+        worksheet = worksheet or worksheet_from_config(self.config, direction.sheet_tab)
+        rows = worksheet.get_all_values()
+        if not rows:
+            worksheet.update(range_name="A1:N1", values=[HEADERS])
+            rows = [HEADERS]
+            try:
+                worksheet.hide_columns(13, 14)
+            except (AttributeError, gspread.exceptions.APIError):
+                pass
+        elif rows[0][:len(HEADERS)] != HEADERS:
+            raise ValueError(f"Sheet {direction.sheet_tab!r} has an incompatible header row")
+
+        companies = list(self.session.scalars(
+            select(Company).join(CompanyDirection, CompanyDirection.company_id == Company.id).where(
+                CompanyDirection.direction_id == direction.id,
+            ).order_by(CompanyDirection.created_at)
+        ))
+        by_id = {company.id: company for company in companies}
+        row_by_id: dict[str, int] = {}
+        for row_number, row in enumerate(rows[1:], start=2):
+            leadflow_id = row[13].strip() if len(row) > 13 else ""
+            if leadflow_id and leadflow_id not in row_by_id:
+                row_by_id[leadflow_id] = row_number
+
+        imported = 0
+        for row_number, row in enumerate(rows[1:], start=2):
+            leadflow_id = row[13].strip() if len(row) > 13 else ""
+            company = by_id.get(leadflow_id)
+            if not company:
+                continue
+            for index, field_name in MANUAL_COLUMNS.items():
+                value = row[index].strip() if len(row) > index else ""
+                if value and _text(getattr(company, field_name)) != value:
+                    imported += int(apply_field(
+                        self.session, company, field_name, _parse_manual(field_name, value),
+                        discovery_method="manual",
+                        source_url=f"google-sheets://{self.config.spreadsheet_id}/{direction.sheet_tab}/{row_number}",
+                        confidence=1.0,
+                    ))
+        self.session.commit()
+
+        inserted = updated = 0
+        next_row = max(len(rows) + 1, 2)
+        for company in companies:
+            row_number = row_by_id.get(company.id)
+            if row_number is None:
+                row_number = next_row
+                next_row += 1
+                inserted += 1
+            else:
+                updated += 1
+            worksheet.update(range_name=f"A{row_number}:N{row_number}", values=[company_row(company)])
+            mapping = self.session.scalar(select(SheetRowMapping).where(
+                SheetRowMapping.company_id == company.id,
+                SheetRowMapping.direction_id == direction.id,
+                SheetRowMapping.spreadsheet_id == self.config.spreadsheet_id,
+            ))
+            if mapping is None:
+                mapping = SheetRowMapping(
+                    company_id=company.id,
+                    direction_id=direction.id,
+                    spreadsheet_id=self.config.spreadsheet_id,
+                    sheet_tab=direction.sheet_tab,
+                    sheet_row=row_number,
+                )
+                self.session.add(mapping)
+            else:
+                mapping.sheet_tab = direction.sheet_tab
+                mapping.sheet_row = row_number
+                mapping.last_synced_at = datetime.now(timezone.utc)
+        self.session.commit()
+        return {"imported": imported, "inserted": inserted, "updated": updated, "total": len(companies)}
 
 
 def sync_companies(session: Session, config: GoogleSheetsConfig) -> dict[str, int]:
-    info = json.loads(decrypt_secret(config.credentials_encrypted))
-    credentials = Credentials.from_service_account_info(
-        info,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-    worksheet = gspread.authorize(credentials).open_by_key(config.spreadsheet_id).worksheet(config.worksheet_name)
-    companies = list(session.scalars(select(Company).order_by(Company.collected_at)))
-    by_source_url = {company.source_url: company for company in companies if company.source_url}
-    imported = 0
-    try:
-        existing_rows = worksheet.get_all_records()
-    except Exception:
-        existing_rows = []
-    preserved_status: dict[str, str] = {}
-    for row in existing_rows:
-        source_url = str(row.get("Ссылка на источник") or "").strip()
-        company = by_source_url.get(source_url)
-        if not company:
-            continue
-        changed = False
-        for sheet_key, attr in (("Направление", "category"), ("Email", "email"), ("Контактное лицо", "contact_person")):
-            value = str(row.get(sheet_key) or "").strip() or None
-            if value and value != getattr(company, attr):
-                setattr(company, attr, value)
-                changed = True
-        sheet_status = str(row.get("Статус") or "").strip()
-        if sheet_status:
-            preserved_status[company.id] = sheet_status
-            blocked = sheet_status.casefold() in {"blocked", "заблокирован", "не отправлять"}
-            if blocked != company.manually_blocked:
-                company.manually_blocked = blocked
-                changed = True
-        if changed:
-            company.raw_data = {**(company.raw_data or {}), "google_sheets_status": sheet_status}
-            imported += 1
-    session.commit()
-    deliveries = {
-        d.company_id: d
-        for d in session.scalars(select(EmailDelivery).order_by(EmailDelivery.sent_at.desc().nullslast()))
-    }
-    rows = [HEADERS]
-    for company in companies:
-        delivery = deliveries.get(company.id)
-        rows.append([
-            company.collected_at.isoformat(), company.category or "", company.company_name, company.city or "",
-            company.address or "", company.email or "", company.inn or "", company.website or "", company.phone or "",
-            company.contact_person or "", company.source, company.source_url or "",
-            delivery.status if delivery else preserved_status.get(company.id, "new"),
-            delivery.sent_at.isoformat() if delivery and delivery.sent_at else "", delivery.template_id if delivery else "",
-            delivery.mailbox_id if delivery else "", bool(delivery and delivery.opened_at), bool(delivery and delivery.clicked_at),
-            bool(delivery and delivery.replied_at), bool(delivery and delivery.bounced_at),
-            bool(delivery and delivery.unsubscribed_at),
-        ])
-    worksheet.clear()
-    if rows:
-        worksheet.update(rows, "A1")
-    return {"imported": imported, "exported": len(companies)}
+    totals = {"imported": 0, "inserted": 0, "updated": 0, "total": 0}
+    directions = list(session.scalars(select(Direction).where(Direction.archived_at.is_(None))))
+    service = GoogleSheetsSyncService(session, config)
+    for direction in directions:
+        result = service.sync_direction(direction)
+        for key in totals:
+            totals[key] += result[key]
+    return totals

@@ -8,8 +8,9 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import Campaign, MailAccount, SourceJob
+from app.models import Campaign, Direction, DirectionRun, MailAccount, SourceJob
 from app.services.collection import execute_job
+from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.imap_monitor import poll_mailbox
 from app.services.mailing import execute_campaign
 
@@ -42,6 +43,35 @@ def refresh_schedules() -> None:
         scheduler.add_job(run_job, trigger, args=[job.id], id=schedule_id, replace_existing=True, max_instances=1)
     for scheduled in scheduler.get_jobs():
         if scheduled.id.startswith("source-job:") and scheduled.id not in wanted:
+            scheduler.remove_job(scheduled.id)
+
+
+def run_direction(direction_id: str) -> None:
+    with SessionLocal() as session:
+        direction = session.get(Direction, direction_id)
+        if direction and direction.active and not direction.archived_at:
+            execute_direction_pipeline(session, direction, get_settings())
+
+
+def refresh_directions() -> None:
+    with SessionLocal() as session:
+        directions = list(session.scalars(select(Direction).where(
+            Direction.active.is_(True), Direction.archived_at.is_(None),
+        )))
+    wanted: set[str] = set()
+    for direction in directions:
+        if not direction.schedule:
+            continue
+        schedule_id = f"direction:{direction.id}"
+        wanted.add(schedule_id)
+        try:
+            trigger = CronTrigger.from_crontab(direction.schedule, timezone="UTC")
+        except ValueError as exc:
+            logger.error("Invalid cron for direction %s: %s", direction.id, exc)
+            continue
+        scheduler.add_job(run_direction, trigger, args=[direction.id], id=schedule_id, replace_existing=True, max_instances=1)
+    for scheduled in scheduler.get_jobs():
+        if scheduled.id.startswith("direction:") and scheduled.id not in wanted:
             scheduler.remove_job(scheduled.id)
 
 
@@ -84,8 +114,10 @@ def refresh_campaigns() -> None:
 
 def main() -> None:
     refresh_schedules()
+    refresh_directions()
     refresh_campaigns()
     scheduler.add_job(refresh_schedules, "interval", seconds=60, id="refresh", replace_existing=True)
+    scheduler.add_job(refresh_directions, "interval", seconds=60, id="refresh-directions", replace_existing=True)
     scheduler.add_job(refresh_campaigns, "interval", seconds=60, id="refresh-campaigns", replace_existing=True)
     scheduler.add_job(poll_imap, "interval", minutes=5, id="imap", replace_existing=True, max_instances=1)
     scheduler.start()

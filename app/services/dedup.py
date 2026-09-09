@@ -21,6 +21,9 @@ class UpsertResult:
 def _merge_enrichment(company: Company, lead: CompanyLead) -> None:
     if not company.email and lead.email:
         company.email = lead.email
+        company.company_email = lead.email
+    if not company.company_phone and lead.phone:
+        company.company_phone = lead.phone
     discovery = (lead.raw_data or {}).get("email_discovery")
     if discovery:
         company.raw_data = {**(company.raw_data or {}), "email_discovery": discovery}
@@ -79,9 +82,12 @@ def upsert_lead(session: Session, lead: CompanyLead) -> UpsertResult:
         address=lead.address,
         phone=lead.phone,
         email=lead.email,
+        company_phone=lead.phone,
+        company_email=lead.email,
         website=lead.website,
         inn=lead.inn,
         contact_person=lead.contact_person,
+        decision_maker_name=lead.contact_person,
         collected_at=lead.collected_at,
         raw_data=lead.raw_data,
         normalized_name=normalize_text(lead.company_name) or "",

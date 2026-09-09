@@ -1,0 +1,9 @@
+[project]
+name = "yamaps-parser"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.28.1",
+    "playwright>=1.61.0",
+]

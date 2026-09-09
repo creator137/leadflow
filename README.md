@@ -31,7 +31,21 @@ Copy `.env.example` to `.env`, then run:
 docker compose up -d --build
 ```
 
+Without a local `.env`, the admin UI/API use development Basic Auth credentials
+`admin` / `change-me-before-production`. Override both values before deployment.
+
 Open API documentation at <http://localhost:8000/docs>.
+
+The primary admin workflow is **Directions** at <http://localhost:8000/>. A
+direction owns its queries, locations, source switches, one shared `limit_new`,
+cron schedule, and Google Sheet tab. Companies remain canonical and are linked
+many-to-many through direction associations.
+
+Google Sheets uses `GOOGLE_SHEETS_SPREADSHEET_ID` and either compact service
+account JSON in `GOOGLE_SERVICE_ACCOUNT_JSON` or a readable in-container path.
+Share the spreadsheet with the JSON credential's `client_email`. The sync pulls
+manual business fields first, then updates rows by the hidden `LeadFlow ID`;
+it never clears and rewrites the whole tab.
 
 After the initial image build, the regular start command is:
 

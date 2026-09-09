@@ -10,25 +10,31 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Req
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import SessionLocal, get_db
 from app.models import (
-    AIConfig, Campaign, Company, EmailDelivery, EmailTemplate, GoogleSheetsConfig,
-    MailAccount, ParserRun, PhraseSearchRun, SourceJob, Suppression, TrackedLink,
+    AIConfig, Campaign, Company, Direction, DirectionRun, EmailDelivery, EmailTemplate,
+    GoogleSheetsConfig, MailAccount, ParserRun, PhraseSearchRun, SourceJob, Suppression, TrackedLink,
 )
 from app.schemas import (
     AIConfigCreate, AIConfigRead, CampaignCreate, CampaignRead, CampaignUpdate, CompanyRead, CompanyUpdate,
-    DeliveryRead, EmailTemplateCreate, EmailTemplateRead, EmailTemplateUpdate, GoogleSheetsConfigCreate,
-    GoogleSheetsConfigRead, MailAccountCreate, MailAccountRead, MailAccountUpdate, ParserRunRead,
+    DeliveryRead, DirectionCreate, DirectionRead, DirectionRunRead, DirectionUpdate, EmailTemplateCreate,
+    EmailTemplateRead, EmailTemplateUpdate, GoogleSheetsConfigCreate, GoogleSheetsConfigRead, MailAccountCreate,
+    MailAccountRead, MailAccountUpdate, ParserRunRead,
     PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead, SourceJobCreate, SourceJobRead, SourceJobUpdate,
 )
 from app.services.collection import execute_job
-from app.services.google_sheets import sync_companies
+from app.services.company_enrichment import CompanyEnrichmentService
+from app.services.direction_pipeline import execute_direction_pipeline
+from app.services.directions import archive_direction, create_direction, serialize_direction, update_direction
+from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_config, sync_companies
 from app.services.mailing import execute_campaign, test_imap, test_smtp
 from app.services.personalized import send_personalized
-from app.services.secrets import encrypt_secret
+from app.services.secrets import decrypt_secret, encrypt_secret
+from app.services.provenance import apply_field
 from app.sources.phrase_search import execute_phrase_search
 
 app = FastAPI(title="LeadFlow", version="0.1.0")
@@ -79,6 +85,8 @@ def system_settings() -> dict[str, str | bool | int]:
         "search_provider_configured": bool(settings.serper_api_key),
         "manager_email_configured": bool(settings.manager_email),
         "admin_auth_enabled": bool(settings.admin_username and settings.admin_password),
+        "google_sheets_spreadsheet_id": settings.google_sheets_spreadsheet_id,
+        "google_service_account_configured": bool(settings.google_service_account_json),
     }
 
 
@@ -107,10 +115,114 @@ def update_company(company_id: str, payload: CompanyUpdate, session: Session = D
     if not company:
         raise HTTPException(404, "Company not found")
     for key, value in payload.model_dump(exclude_unset=True).items():
-        setattr(company, key, value)
+        canonical = {"email": "company_email", "contact_person": "decision_maker_name"}.get(key, key)
+        if canonical == "manually_blocked":
+            company.manually_blocked = value
+        else:
+            apply_field(session, company, canonical, value, discovery_method="manual", confidence=1.0)
     session.commit()
     session.refresh(company)
     return company
+
+
+@app.get("/api/directions", response_model=list[DirectionRead])
+def directions(include_archived: bool = False, session: Session = Depends(get_db)) -> list[DirectionRead]:
+    query = select(Direction).order_by(Direction.created_at.desc())
+    if not include_archived:
+        query = query.where(Direction.archived_at.is_(None))
+    return [serialize_direction(session, item) for item in session.scalars(query)]
+
+
+@app.post("/api/directions", response_model=DirectionRead, status_code=201)
+def add_direction(payload: DirectionCreate, session: Session = Depends(get_db)) -> DirectionRead:
+    try:
+        direction = create_direction(session, payload)
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "Direction name or Google Sheet tab already exists") from exc
+    return serialize_direction(session, direction)
+
+
+@app.patch("/api/directions/{direction_id}", response_model=DirectionRead)
+def edit_direction(direction_id: str, payload: DirectionUpdate, session: Session = Depends(get_db)) -> DirectionRead:
+    direction = session.get(Direction, direction_id)
+    if not direction or direction.archived_at:
+        raise HTTPException(404, "Direction not found")
+    try:
+        update_direction(session, direction, payload)
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "Direction name or Google Sheet tab already exists") from exc
+    return serialize_direction(session, direction)
+
+
+@app.delete("/api/directions/{direction_id}", status_code=204)
+def remove_direction(direction_id: str, session: Session = Depends(get_db)) -> Response:
+    direction = session.get(Direction, direction_id)
+    if not direction:
+        raise HTTPException(404, "Direction not found")
+    archive_direction(session, direction)
+    return Response(status_code=204)
+
+
+def _active_sheets_config(session: Session) -> GoogleSheetsConfig | None:
+    return active_sheets_config(session, get_settings())
+
+
+def _run_direction_background(direction_id: str, run_id: str) -> None:
+    with SessionLocal() as session:
+        direction = session.get(Direction, direction_id)
+        run = session.get(DirectionRun, run_id)
+        if not direction or not run:
+            return
+        execute_direction_pipeline(session, direction, get_settings(), run)
+
+
+@app.post("/api/directions/{direction_id}/run", response_model=DirectionRunRead, status_code=202)
+def run_direction(direction_id: str, tasks: BackgroundTasks, session: Session = Depends(get_db)) -> DirectionRun:
+    direction = session.get(Direction, direction_id)
+    if not direction or direction.archived_at or not direction.active:
+        raise HTTPException(404, "Active direction not found")
+    run = DirectionRun(direction_id=direction.id, limit_new=direction.limit_new, status="queued")
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    tasks.add_task(_run_direction_background, direction.id, run.id)
+    return run
+
+
+@app.get("/api/direction-runs", response_model=list[DirectionRunRead])
+def direction_runs(limit: int = Query(100, ge=1, le=1000), session: Session = Depends(get_db)) -> list[DirectionRun]:
+    return list(session.scalars(select(DirectionRun).order_by(DirectionRun.started_at.desc()).limit(limit)))
+
+
+@app.post("/api/direction-runs/{run_id}/resume", response_model=DirectionRunRead, status_code=202)
+def resume_direction(run_id: str, tasks: BackgroundTasks, session: Session = Depends(get_db)) -> DirectionRun:
+    run = session.get(DirectionRun, run_id)
+    if not run:
+        raise HTTPException(404, "Direction run not found")
+    if run.status not in {"failed", "blocked", "exhausted"}:
+        raise HTTPException(409, f"Direction run with status {run.status!r} cannot be resumed")
+    direction = session.get(Direction, run.direction_id)
+    if not direction:
+        raise HTTPException(404, "Direction not found")
+    run.status = "queued"
+    run.message = None
+    run.finished_at = None
+    session.commit()
+    tasks.add_task(_run_direction_background, direction.id, run.id)
+    return run
+
+
+@app.post("/api/companies/{company_id}/enrich")
+def enrich_company(company_id: str, use_ai: bool = False, session: Session = Depends(get_db)) -> dict[str, int]:
+    company = session.get(Company, company_id)
+    if not company:
+        raise HTTPException(404, "Company not found")
+    ai_config = session.scalar(select(AIConfig).where(AIConfig.active.is_(True)).limit(1)) if use_ai else None
+    if use_ai and not ai_config:
+        raise HTTPException(409, "Active AI configuration not found")
+    return CompanyEnrichmentService(session).enrich(company, ai_config=ai_config)
 
 
 @app.get("/api/dashboard")
@@ -452,6 +564,33 @@ def sync_sheet(config_id: str, session: Session = Depends(get_db)) -> dict[str, 
     if not config:
         raise HTTPException(404, "Google Sheets config not found")
     return sync_companies(session, config)
+
+
+@app.post("/api/directions/{direction_id}/sync")
+def sync_direction_sheet(direction_id: str, session: Session = Depends(get_db)) -> dict[str, int]:
+    direction = session.get(Direction, direction_id)
+    if not direction:
+        raise HTTPException(404, "Direction not found")
+    config = _active_sheets_config(session)
+    if not config:
+        raise HTTPException(409, "Active Google Sheets configuration not found")
+    return GoogleSheetsSyncService(session, config).sync_direction(direction)
+
+
+@app.get("/api/google-sheets/status")
+def sheets_status(session: Session = Depends(get_db)) -> dict[str, str | bool | None]:
+    config = _active_sheets_config(session)
+    service_account_email = None
+    if config:
+        try:
+            service_account_email = json.loads(decrypt_secret(config.credentials_encrypted)).get("client_email")
+        except Exception:
+            pass
+    return {
+        "configured": bool(config),
+        "spreadsheet_id": config.spreadsheet_id if config else get_settings().google_sheets_spreadsheet_id,
+        "service_account_email": service_account_email,
+    }
 
 
 @app.get("/api/ai-settings", response_model=list[AIConfigRead])

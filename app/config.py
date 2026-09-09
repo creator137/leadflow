@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     manager_email: str | None = None
     admin_username: str | None = None
     admin_password: str | None = None
+    google_sheets_spreadsheet_id: str = "1-xcz_byoVsmrwLFK1qH4ykQSNff3LOkxoHiu0ceHpqg"
+    google_service_account_json: str | None = None
 
 
 @lru_cache

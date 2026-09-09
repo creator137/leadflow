@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from apscheduler.triggers.cron import CronTrigger
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ORMModel(BaseModel):
@@ -21,6 +22,17 @@ class CompanyRead(ORMModel):
     address: str | None
     phone: str | None
     email: str | None
+    region: str | None
+    company_email: str | None
+    company_phone: str | None
+    branches_count: int | None
+    decision_maker_name: str | None
+    decision_maker_position: str | None
+    decision_maker_email: str | None
+    decision_maker_phone: str | None
+    communication_started_at: datetime | None
+    action: str | None
+    result: str | None
     website: str | None
     inn: str | None
     contact_person: str | None
@@ -32,7 +44,123 @@ class CompanyRead(ORMModel):
 class CompanyUpdate(BaseModel):
     email: str | None = None
     contact_person: str | None = None
+    company_email: str | None = None
+    company_phone: str | None = None
+    decision_maker_name: str | None = None
+    decision_maker_position: str | None = None
+    decision_maker_email: str | None = None
+    decision_maker_phone: str | None = None
+    communication_started_at: datetime | None = None
+    action: str | None = None
+    result: str | None = None
     manually_blocked: bool | None = None
+
+
+class DirectionQueryInput(BaseModel):
+    query: str = Field(min_length=1, max_length=255)
+    active: bool = True
+    priority: int = Field(default=100, ge=0, le=10_000)
+
+
+class DirectionLocationInput(BaseModel):
+    city: str = Field(min_length=1, max_length=255)
+    region: str | None = Field(default=None, max_length=255)
+    active: bool = True
+
+
+class DirectionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    sheet_tab: str = Field(min_length=1, max_length=100)
+    active: bool = True
+    limit_new: int = Field(default=50, ge=1, le=10_000)
+    schedule: str | None = None
+    email_enrichment_enabled: bool = False
+    ai_enrichment_enabled: bool = False
+    queries: list[DirectionQueryInput] = Field(min_length=1)
+    locations: list[DirectionLocationInput] = Field(min_length=1)
+    sources: list[Literal["yandex_maps", "two_gis"]] = Field(min_length=1)
+
+    @field_validator("schedule")
+    @classmethod
+    def valid_cron(cls, value: str | None) -> str | None:
+        if value:
+            CronTrigger.from_crontab(value, timezone="UTC")
+        return value
+
+    @field_validator("sheet_tab")
+    @classmethod
+    def valid_sheet_tab(cls, value: str) -> str:
+        if any(character in value for character in "[]:*?/\\"):
+            raise ValueError("Google Sheet tab contains a forbidden character")
+        return value.strip()
+
+
+class DirectionUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    sheet_tab: str | None = Field(default=None, min_length=1, max_length=100)
+    active: bool | None = None
+    limit_new: int | None = Field(default=None, ge=1, le=10_000)
+    schedule: str | None = None
+    email_enrichment_enabled: bool | None = None
+    ai_enrichment_enabled: bool | None = None
+    queries: list[DirectionQueryInput] | None = None
+    locations: list[DirectionLocationInput] | None = None
+    sources: list[Literal["yandex_maps", "two_gis"]] | None = None
+
+    @field_validator("schedule")
+    @classmethod
+    def valid_cron(cls, value: str | None) -> str | None:
+        if value:
+            CronTrigger.from_crontab(value, timezone="UTC")
+        return value
+
+    @field_validator("sheet_tab")
+    @classmethod
+    def valid_sheet_tab(cls, value: str | None) -> str | None:
+        if value and any(character in value for character in "[]:*?/\\"):
+            raise ValueError("Google Sheet tab contains a forbidden character")
+        return value.strip() if value else value
+
+
+class DirectionQueryRead(DirectionQueryInput, ORMModel):
+    id: str
+
+
+class DirectionLocationRead(DirectionLocationInput, ORMModel):
+    id: str
+
+
+class DirectionRead(ORMModel):
+    id: str
+    name: str
+    slug: str
+    sheet_tab: str
+    active: bool
+    archived_at: datetime | None
+    limit_new: int
+    schedule: str | None
+    email_enrichment_enabled: bool
+    ai_enrichment_enabled: bool
+    queries: list[DirectionQueryRead]
+    locations: list[DirectionLocationRead]
+    sources: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+class DirectionRunRead(ORMModel):
+    id: str
+    direction_id: str
+    status: str
+    limit_new: int
+    scanned: int
+    inserted: int
+    duplicates: int
+    errors: int
+    message: str | None
+    checkpoint: dict[str, Any]
+    started_at: datetime
+    finished_at: datetime | None
 
 
 class SourceJobCreate(BaseModel):
