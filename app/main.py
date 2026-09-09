@@ -17,7 +17,7 @@ from app.config import get_settings, validate_production_secrets
 from app.db import SessionLocal, get_db
 from app.models import (
     AIConfig, Campaign, Company, Direction, DirectionRun, EmailDelivery, EmailTemplate,
-    GoogleSheetsConfig, MailAccount, ParserRun, PhraseSearchRun, SourceJob, Suppression, TrackedLink,
+    GoogleSheetsConfig, MailAccount, ParserRun, PhraseSearchRun, SheetRowMapping, SourceJob, Suppression, TrackedLink,
 )
 from app.schemas import (
     AIConfigCreate, AIConfigRead, CampaignCreate, CampaignRead, CampaignUpdate, CompanyRead, CompanyUpdate,
@@ -30,7 +30,7 @@ from app.services.collection import execute_job
 from app.services.company_enrichment import CompanyEnrichmentService
 from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.directions import archive_direction, create_direction, serialize_direction, update_direction
-from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_config, sync_companies
+from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_config, sync_companies, worksheet_from_config
 from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, execute_campaign, process_queue, render_template_parts
 from app.services.personalized import ConfiguredAIProvider, send_personalized
 from app.services.secrets import decrypt_secret, encrypt_secret
@@ -686,7 +686,7 @@ def sync_direction_sheet(direction_id: str, session: Session = Depends(get_db)) 
 
 
 @app.get("/api/google-sheets/status")
-def sheets_status(session: Session = Depends(get_db)) -> dict[str, str | bool | None]:
+def sheets_status(session: Session = Depends(get_db)) -> dict[str, object]:
     config = _active_sheets_config(session)
     service_account_email = None
     if config:
@@ -698,7 +698,23 @@ def sheets_status(session: Session = Depends(get_db)) -> dict[str, str | bool | 
         "configured": bool(config),
         "spreadsheet_id": config.spreadsheet_id if config else get_settings().google_sheets_spreadsheet_id,
         "service_account_email": service_account_email,
+        "mapped_rows": session.scalar(select(func.count()).select_from(SheetRowMapping).where(SheetRowMapping.spreadsheet_id == config.spreadsheet_id)) if config else 0,
+        "last_sync_at": session.scalar(select(func.max(SheetRowMapping.last_synced_at)).where(SheetRowMapping.spreadsheet_id == config.spreadsheet_id)) if config else None,
     }
+
+
+@app.post("/api/google-sheets/test")
+def test_sheets_connection(session: Session = Depends(get_db)) -> dict[str, object]:
+    config = _active_sheets_config(session)
+    if not config: raise HTTPException(409, "Active Google Sheets configuration not found")
+    direction = session.scalar(select(Direction).where(Direction.archived_at.is_(None)).limit(1))
+    if not direction: raise HTTPException(409, "No Direction is configured")
+    try:
+        worksheet = worksheet_from_config(config, direction.sheet_tab)
+        spreadsheet = worksheet.spreadsheet
+        return {"connected": True, "spreadsheet_title": spreadsheet.title, "tabs": [item.title for item in spreadsheet.worksheets()]}
+    except Exception as exc:
+        raise HTTPException(502, f"Google Sheets connection failed ({exc.__class__.__name__})") from exc
 
 
 @app.get("/api/ai-settings", response_model=list[AIConfigRead])

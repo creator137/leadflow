@@ -9,3 +9,7 @@ dist/
 build/
 parser-output/
 .tmp_leadflow*.db
+# Local Google service-account credentials. Never commit these files.
+neat-bank-*.json
+*service-account*.json
+credentials*.json

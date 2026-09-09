@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.models import Company, CompanyDirection, CompanyFieldProvenance, Direction, GoogleSheetsConfig, SheetRowMapping
-from app.services.google_sheets import COLUMNS, HEADERS, GoogleSheetsSyncService
+from app.services.google_sheets import COLUMNS, HEADERS, GoogleSheetsSyncService, _retry, discover_schema
 from app.services.provenance import apply_field
 
 
@@ -22,6 +22,16 @@ class FakeWorksheet:
 
     def hide_columns(self, *_):
         pass
+
+    def batch_update(self, updates):
+        from gspread.utils import a1_to_rowcol
+        for update in updates:
+            row, column = a1_to_rowcol(update["range"])
+            while len(self.rows) < row:
+                self.rows.append([])
+            while len(self.rows[row - 1]) < column:
+                self.rows[row - 1].append("")
+            self.rows[row - 1][column - 1] = update["values"][0][0]
 
 
 def setup_company(session: Session):
@@ -46,6 +56,15 @@ def test_duplicate_headers_are_mapped_by_position() -> None:
     assert COLUMNS[9][1] == "decision_maker_email"
     assert COLUMNS[7][1] == "company_phone"
     assert COLUMNS[10][1] == "decision_maker_phone"
+
+
+def test_realistic_second_row_schema_and_email_status() -> None:
+    rows = [[], ["Начало общения    Дата", "Наименование клиента", "Область", "Город", "Кол-во филиалов", "Адрес ", "Почта ", "Телефон", "ЛПР", "Почта", "Телефон", "Статус почтовых отправлений", "Действие", "Результат", "Комментарии"]]
+    schema = discover_schema(rows)
+    assert schema.header_row == 2 and schema.data_row == 3
+    assert schema.fields["company_email"] == 7 and schema.fields["decision_maker_email"] == 10
+    assert schema.fields["company_phone"] == 8 and schema.fields["decision_maker_phone"] == 11
+    assert schema.email_status_column == 12 and schema.leadflow_id_column == 16
 
 
 def test_sheet_identity_update_and_manual_preservation() -> None:
@@ -80,3 +99,46 @@ def test_sheet_identity_update_and_manual_preservation() -> None:
             CompanyFieldProvenance.company_id == company.id,
             CompanyFieldProvenance.field == "decision_maker_name",
         )) == "manual"
+
+
+def test_row_movement_is_found_by_leadflow_id() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction, company, config = setup_company(session)
+        worksheet = FakeWorksheet()
+        service = GoogleSheetsSyncService(session, config)
+        service.sync_direction(direction, worksheet=worksheet)
+        worksheet.rows.insert(1, ["manual spacer"])
+        company.company_phone = "+7 000 000-00-00"
+        result = service.sync_direction(direction, worksheet=worksheet)
+        assert result["inserted"] == 0 and result["updated"] == 1
+        matches = [row for row in worksheet.rows if len(row) > 13 and row[13] == company.id]
+        assert len(matches) == 1 and matches[0][7] == "+7 999 111-22-33"  # manual sheet value wins
+
+
+def test_duplicate_leadflow_id_is_rejected() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction, company, config = setup_company(session)
+        worksheet = FakeWorksheet()
+        service = GoogleSheetsSyncService(session, config)
+        service.sync_direction(direction, worksheet=worksheet)
+        worksheet.rows.append(worksheet.rows[1][:])
+        import pytest
+        with pytest.raises(ValueError, match="Duplicate LeadFlow ID"):
+            service.sync_direction(direction, worksheet=worksheet)
+
+
+def test_transient_google_error_is_retried(monkeypatch) -> None:
+    import requests
+    attempts = 0
+    def operation():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise requests.ConnectionError("transient")
+        return "ok"
+    monkeypatch.setattr("app.services.google_sheets.time.sleep", lambda _: None)
+    assert _retry(operation) == "ok" and attempts == 3
