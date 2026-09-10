@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import Base
-from app.models import Company, CompanyDirection, CompanySourceRecord, DirectionRun
+from app.models import Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord, DirectionRun, SearchObservation
 from app.schemas import DirectionCreate, DirectionLocationInput, DirectionQueryInput
 from app.services.direction_collection import execute_direction
 from app.services.directions import create_direction
@@ -24,6 +24,8 @@ class DirectionAdapter(SourceAdapter):
                 city=spec.city,
                 address=f"ул. Тестовая, {number}",
                 phone=f"+7 999 000 00 0{number}",
+                website=f"https://company-{number}.example",
+                branches_count=number if number > 1 else None,
             )
 
 
@@ -53,6 +55,8 @@ def test_direction_limit_is_shared_and_repeat_finds_next(monkeypatch) -> None:
         assert second.inserted == 2
         assert second.duplicates >= 2
         assert session.query(CompanyDirection).count() == 4
+        assert session.query(SearchObservation).count() >= 4
+        assert session.query(CompanyFieldProvenance).filter_by(field="branches_count").count() >= 1
 
 
 def test_cross_source_company_is_canonical_and_provenance_retained(monkeypatch) -> None:

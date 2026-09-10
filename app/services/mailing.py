@@ -33,12 +33,12 @@ def normalize_email(value: str) -> str:
 
 
 def safe_mail_error(exc: Exception) -> str:
-    if isinstance(exc, smtplib.SMTPAuthenticationError): return "SMTP authentication failed"
-    if isinstance(exc, imaplib.IMAP4.error): return "IMAP authentication or protocol error"
-    if isinstance(exc, (socket.timeout, TimeoutError)): return "Mail server connection timed out"
-    if isinstance(exc, (ConnectionError, OSError)): return f"Mail server connection failed ({exc.__class__.__name__})"
-    if isinstance(exc, smtplib.SMTPException): return f"SMTP operation failed ({exc.__class__.__name__})"
-    return f"Mail operation failed ({exc.__class__.__name__})"
+    if isinstance(exc, smtplib.SMTPAuthenticationError): return "Не удалось войти в почту. Проверьте адрес и пароль приложения."
+    if isinstance(exc, imaplib.IMAP4.error): return "Не удалось проверить входящие письма."
+    if isinstance(exc, (socket.timeout, TimeoutError)): return "Почтовый сервер не ответил вовремя. Попробуйте ещё раз."
+    if isinstance(exc, (ConnectionError, OSError)): return "Не удалось подключиться к почте. Проверьте интернет и настройки."
+    if isinstance(exc, smtplib.SMTPException): return "Не удалось отправить письмо. Система попробует ещё раз."
+    return "Не удалось выполнить операцию с почтой."
 
 
 def render_template_parts(template: EmailTemplate, company: Company, extra: dict[str, str] | None = None, account: MailAccount | None = None) -> tuple[str, str, str]:

@@ -40,13 +40,18 @@ def apply_field(
     """Apply a value only when its ownership outranks the current provenance."""
     if value is None or value == "":
         return False
+    if field == "website":
+        from app.normalize import normalize_website
+        value = normalize_website(str(value))
+        if not value:
+            return False
     previous = latest_provenance(session, company.id, field)
     incoming_priority = METHOD_PRIORITY.get(discovery_method, 0)
     previous_priority = METHOD_PRIORITY.get(previous.discovery_method, 0) if previous else -1
     current = getattr(company, field)
     if previous and previous_priority > incoming_priority:
         return False
-    if previous and previous_priority == incoming_priority and current not in (None, "") and current != value:
+    if previous and previous_priority == incoming_priority and discovery_method != "manual" and current not in (None, "") and current != value:
         return False
     setattr(company, field, value)
     if field == "company_email":
@@ -55,6 +60,9 @@ def apply_field(
         company.phone = value
     elif field == "decision_maker_name":
         company.contact_person = value
+    elif field == "website":
+        from app.normalize import website_domain
+        company.website_domain = website_domain(value)
     session.add(CompanyFieldProvenance(
         company_id=company.id,
         field=field,

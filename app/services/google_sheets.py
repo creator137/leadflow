@@ -11,12 +11,22 @@ from typing import Any, Callable, TypeVar
 
 import gspread
 import requests
+from google.auth.exceptions import TransportError
 from google.oauth2.service_account import Credentials
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.models import Company, CompanyDirection, Direction, EmailDelivery, GoogleSheetsConfig, SheetRowMapping
+from app.models import (
+    Company,
+    CompanyDirection,
+    CompanyFieldProvenance,
+    Direction,
+    EmailDelivery,
+    GoogleSheetsConfig,
+    GoogleSyncRun,
+    SheetRowMapping,
+)
 from app.services.provenance import apply_field
 from app.services.secrets import decrypt_secret, encrypt_secret
 
@@ -27,13 +37,14 @@ COLUMNS: tuple[tuple[str, str], ...] = (
     ("Область", "region"), ("Город", "city"), ("Кол-во филиалов", "branches_count"),
     ("Адрес", "address"), ("Почта", "company_email"), ("Телефон", "company_phone"),
     ("ЛПР", "decision_maker_name"), ("Почта", "decision_maker_email"),
-    ("Телефон", "decision_maker_phone"), ("Действие", "action"), ("Результат?", "result"),
+    ("Телефон", "decision_maker_phone"), ("Сайт", "website"),
+    ("Действие", "action"), ("Результат?", "result"),
     ("LeadFlow ID", "id"),
 )
 HEADERS = [header for header, _ in COLUMNS]
 MANUAL_FIELDS = {
     "communication_started_at", "region", "city", "branches_count", "address", "company_email",
-    "company_phone", "decision_maker_name", "decision_maker_email", "decision_maker_phone", "action", "result",
+    "company_phone", "decision_maker_name", "decision_maker_email", "decision_maker_phone", "website", "action", "result",
 }
 T = TypeVar("T")
 
@@ -50,9 +61,9 @@ def _retry(operation: Callable[[], T], attempts: int = 4) -> T:
     for attempt in range(attempts):
         try:
             return operation()
-        except (gspread.exceptions.APIError, requests.RequestException) as exc:
+        except (gspread.exceptions.APIError, requests.RequestException, TransportError) as exc:
             status = getattr(getattr(exc, "response", None), "status_code", 0)
-            transient = isinstance(exc, requests.RequestException) or status in {429, 500, 502, 503, 504}
+            transient = isinstance(exc, (requests.RequestException, TransportError)) or status in {429, 500, 502, 503, 504}
             if not transient or attempt == attempts - 1:
                 raise
             time.sleep((2 ** attempt) + random.random())
@@ -97,6 +108,7 @@ def discover_schema(rows: list[list[str]]) -> SheetSchema:
         elif "кол-во филиалов" in value or "количество филиалов" in value: fields["branches_count"] = index
         elif value == "адрес": fields["address"] = index
         elif value == "лпр": fields["decision_maker_name"] = index
+        elif value in {"сайт", "веб-сайт", "website"}: fields["website"] = index
         elif value == "почта": email_columns.append(index)
         elif value == "телефон": phone_columns.append(index)
         elif value == "действие": actions.append(index)
@@ -136,6 +148,9 @@ def _parse_manual(field_name: str, value: str) -> Any:
     if field_name == "branches_count":
         try: return int(value)
         except ValueError: return value
+    if field_name == "website":
+        from app.normalize import normalize_website
+        return normalize_website(value)
     return value
 
 
@@ -149,7 +164,7 @@ def worksheet_from_config(config: GoogleSheetsConfig, sheet_tab: str):
         return spreadsheet.worksheet(sheet_tab)
     except gspread.WorksheetNotFound:
         worksheet = spreadsheet.add_worksheet(title=sheet_tab, rows=1000, cols=len(COLUMNS))
-        worksheet.update(range_name="A1:N1", values=[HEADERS])
+        worksheet.update(range_name=f"A1:{_column_letter(len(COLUMNS))}1", values=[HEADERS])
         return worksheet
 
 
@@ -171,10 +186,21 @@ class GoogleSheetsSyncService:
         worksheet = worksheet or _retry(lambda: worksheet_from_config(self.config, direction.sheet_tab))
         rows = _retry(worksheet.get_all_values)
         if not rows or not any(any(cell.strip() for cell in row) for row in rows):
-            _retry(lambda: worksheet.update(range_name="A1:N1", values=[HEADERS]))
+            _retry(lambda: worksheet.update(range_name=f"A1:{_column_letter(len(COLUMNS))}1", values=[HEADERS]))
             rows = [HEADERS]
         schema = discover_schema(rows)
         header = rows[schema.header_row - 1]
+        for field_name, field_header in (("branches_count", "Кол-во филиалов"), ("website", "Сайт")):
+            if field_name in schema.fields:
+                continue
+            column = max(len(header), schema.leadflow_id_column) + 1
+            if getattr(worksheet, "col_count", column) < column:
+                _retry(lambda: worksheet.add_cols(column - worksheet.col_count))
+            cell = f"{_column_letter(column)}{schema.header_row}"
+            _retry(lambda cell=cell, field_header=field_header: worksheet.update(range_name=cell, values=[[field_header]]))
+            while len(header) < column: header.append("")
+            header[column - 1] = field_header
+            schema.fields[field_name] = column
         if len(header) < schema.leadflow_id_column or _normalized(header[schema.leadflow_id_column - 1]) != "leadflow id":
             cell = f"{_column_letter(schema.leadflow_id_column)}{schema.header_row}"
             _retry(lambda: worksheet.update(range_name=cell, values=[["LeadFlow ID"]]))
@@ -192,20 +218,38 @@ class GoogleSheetsSyncService:
             if leadflow_id in row_by_id: raise ValueError(f"Duplicate LeadFlow ID found in rows {row_by_id[leadflow_id]} and {row_number}")
             row_by_id[leadflow_id] = row_number
 
+        mappings = {m.company_id: m for m in self.session.scalars(select(SheetRowMapping).where(SheetRowMapping.direction_id == direction.id, SheetRowMapping.spreadsheet_id == self.config.spreadsheet_id))}
+        provenance_rows = self.session.scalars(select(CompanyFieldProvenance).where(
+            CompanyFieldProvenance.company_id.in_(by_id.keys()),
+            CompanyFieldProvenance.discovery_method == "manual",
+        ).order_by(CompanyFieldProvenance.discovered_at.desc())).all()
+        latest_manual: dict[tuple[str, str], CompanyFieldProvenance] = {}
+        for provenance in provenance_rows:
+            latest_manual.setdefault((provenance.company_id, provenance.field), provenance)
+        sheet_owned = {
+            key for key, provenance in latest_manual.items()
+            if (provenance.source_url or "").startswith("google-sheets://")
+        }
         imported = 0
         for company_id, row_number in row_by_id.items():
             company = by_id.get(company_id)
             if not company: continue
             row = rows[row_number - 1] if row_number <= len(rows) else []
+            snapshot = (mappings.get(company_id).last_synced_values or {}) if mappings.get(company_id) else {}
             for field_name in MANUAL_FIELDS:
                 index = schema.fields.get(field_name)
                 if not index: continue
                 value = row[index - 1].strip() if len(row) >= index else ""
-                if value and _text(getattr(company, field_name)) != value:
-                    imported += int(apply_field(self.session, company, field_name, _parse_manual(field_name, value), discovery_method="manual", source_url=f"google-sheets://{self.config.spreadsheet_id}/{direction.sheet_tab}/{row_number}", confidence=1.0))
+                changed_by_user = bool(value) and (
+                    field_name not in snapshot or value != snapshot.get(field_name, "")
+                    or (company_id, field_name) in sheet_owned
+                )
+                parsed_value = _parse_manual(field_name, value)
+                needs_manual_owner = (company_id, field_name) not in sheet_owned
+                if changed_by_user and (getattr(company, field_name) != parsed_value or needs_manual_owner):
+                    imported += int(apply_field(self.session, company, field_name, parsed_value, discovery_method="manual", source_url=f"google-sheets://{self.config.spreadsheet_id}/{direction.sheet_tab}/{row_number}", confidence=1.0))
         self.session.commit()
 
-        mappings = {m.company_id: m for m in self.session.scalars(select(SheetRowMapping).where(SheetRowMapping.direction_id == direction.id, SheetRowMapping.spreadsheet_id == self.config.spreadsheet_id))}
         # Rows may all shift after a user inserts/sorts rows. Move cached row numbers
         # out of the positive worksheet range first so the unique cache constraint
         # cannot collide while SQLAlchemy flushes individual mapping updates.
@@ -232,24 +276,37 @@ class GoogleSheetsSyncService:
                 occupied.add(row_number)
             else: updated += 1
             existing = rows[row_number - 1] if row_number <= len(rows) else []
+            mapping = mappings.get(company.id)
+            snapshot = (mapping.last_synced_values or {}) if mapping else {}
+            synced_values: dict[str, str] = {}
             for field_name, column in schema.fields.items():
                 value = _text(getattr(company, field_name))
                 current = existing[column - 1].strip() if len(existing) >= column else ""
-                if field_name in MANUAL_FIELDS and current:
+                changed_by_user = field_name in MANUAL_FIELDS and bool(current) and (
+                    field_name not in snapshot or current != snapshot.get(field_name, "")
+                    or (company.id, field_name) in sheet_owned
+                )
+                if changed_by_user:
                     value = current
                 if value != current:
                     updates.append({"range": f"{_column_letter(column)}{row_number}", "values": [[value]]})
+                if field_name != "id":
+                    synced_values[field_name] = value
             if schema.email_status_column:
                 latest = self.session.scalar(select(EmailDelivery.status).where(EmailDelivery.company_id == company.id, EmailDelivery.direction_id == direction.id).order_by(EmailDelivery.created_at.desc()).limit(1)) or ""
                 current = existing[schema.email_status_column - 1].strip() if len(existing) >= schema.email_status_column else ""
                 if latest != current: updates.append({"range": f"{_column_letter(schema.email_status_column)}{row_number}", "values": [[latest]]})
-            mapping = mappings.get(company.id)
             if mapping is None:
-                mapping = SheetRowMapping(company_id=company.id, direction_id=direction.id, spreadsheet_id=self.config.spreadsheet_id, sheet_tab=direction.sheet_tab, sheet_row=row_number)
+                mapping = SheetRowMapping(company_id=company.id, direction_id=direction.id, spreadsheet_id=self.config.spreadsheet_id, sheet_tab=direction.sheet_tab, sheet_row=row_number, last_synced_values=synced_values)
                 self.session.add(mapping)
             else:
-                mapping.sheet_tab, mapping.sheet_row, mapping.last_synced_at = direction.sheet_tab, row_number, datetime.now(timezone.utc)
+                mapping.sheet_tab, mapping.sheet_row, mapping.last_synced_at, mapping.last_synced_values = direction.sheet_tab, row_number, datetime.now(timezone.utc), synced_values
         if updates: _retry(lambda: worksheet.batch_update(updates))
+        self.session.add(GoogleSyncRun(
+            config_id=self.config.id, direction_id=direction.id, status="completed",
+            rows_inserted=inserted, rows_updated=updated, manual_changes=imported,
+            finished_at=datetime.now(timezone.utc),
+        ))
         self.session.commit()
         return {"imported": imported, "inserted": inserted, "updated": updated, "total": len(companies)}
 

@@ -236,7 +236,7 @@ class CompanyEnrichmentService:
         if ai_config and snapshot.pages:
             result = analyze_with_ai(snapshot, ai_config)
             for field_name in (
-                "region", "branches_count", "decision_maker_name", "decision_maker_position",
+                "region", "decision_maker_name", "decision_maker_position",
                 "decision_maker_email", "decision_maker_phone", "inn",
             ):
                 value = getattr(result, field_name)

@@ -33,7 +33,7 @@ dev = ["pytest>=8.3,<9"]
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["static/*.html"]
+app = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

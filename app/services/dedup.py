@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import Company
-from app.normalize import name_address_fingerprint, normalize_phone, normalize_text, website_domain
+from app.normalize import name_address_fingerprint, normalize_phone, normalize_text, normalize_website, website_domain
 from app.sources.base import CompanyLead
 
 
@@ -18,12 +18,25 @@ class UpsertResult:
     matched_by: str | None = None
 
 
-def _merge_enrichment(company: Company, lead: CompanyLead) -> None:
+def _merge_enrichment(session: Session, company: Company, lead: CompanyLead) -> None:
     if not company.email and lead.email:
         company.email = lead.email
         company.company_email = lead.email
-    if not company.company_phone and lead.phone:
+    phone = normalize_phone(lead.phone)
+    phone_owner = session.scalar(select(Company.id).where(Company.normalized_phone == phone, Company.id != company.id).limit(1)) if phone else None
+    if not company.company_phone and lead.phone and not phone_owner:
         company.company_phone = lead.phone
+        company.phone = lead.phone
+        company.normalized_phone = phone
+    if not company.website and lead.website:
+        normalized_site = normalize_website(lead.website)
+        domain = website_domain(normalized_site)
+        domain_owner = session.scalar(select(Company.id).where(Company.website_domain == domain, Company.id != company.id).limit(1)) if domain else None
+        if not domain_owner:
+            company.website = normalized_site
+            company.website_domain = domain
+    if company.branches_count is None and lead.branches_count is not None:
+        company.branches_count = lead.branches_count
     discovery = (lead.raw_data or {}).get("email_discovery")
     if discovery:
         company.raw_data = {**(company.raw_data or {}), "email_discovery": discovery}
@@ -33,43 +46,28 @@ def find_duplicate(session: Session, lead: CompanyLead) -> tuple[Company | None,
     domain = website_domain(lead.website)
     phone = normalize_phone(lead.phone)
     fingerprint = name_address_fingerprint(lead.company_name, lead.address)
-    clauses = []
-    labels = []
     if lead.source_external_id:
-        clauses.append((Company.source == lead.source) & (Company.source_external_id == lead.source_external_id))
-        labels.append("source_external_id")
+        company = session.scalar(select(Company).where(Company.source == lead.source, Company.source_external_id == lead.source_external_id).limit(1))
+        if company: return company, "source_external_id"
     if domain:
-        clauses.append(Company.website_domain == domain)
-        labels.append("website_domain")
+        company = session.scalar(select(Company).where(Company.website_domain == domain).limit(1))
+        if company: return company, "website_domain"
     if phone:
-        clauses.append(Company.normalized_phone == phone)
-        labels.append("phone")
+        company = session.scalar(select(Company).where(Company.normalized_phone == phone).limit(1))
+        if company: return company, "phone"
     if lead.inn:
-        clauses.append(Company.inn == lead.inn)
-        labels.append("inn")
+        company = session.scalar(select(Company).where(Company.inn == lead.inn).limit(1))
+        if company: return company, "inn"
     if fingerprint:
-        clauses.append(Company.name_address_fingerprint == fingerprint)
-        labels.append("name_address")
-    if not clauses:
-        return None, None
-    company = session.scalar(select(Company).where(or_(*clauses)).limit(1))
-    if not company:
-        return None, None
-    if lead.source_external_id and company.source == lead.source and company.source_external_id == lead.source_external_id:
-        return company, "source_external_id"
-    if domain and company.website_domain == domain:
-        return company, "website_domain"
-    if phone and company.normalized_phone == phone:
-        return company, "phone"
-    if lead.inn and company.inn == lead.inn:
-        return company, "inn"
-    return company, labels[-1]
+        company = session.scalar(select(Company).where(Company.name_address_fingerprint == fingerprint).limit(1))
+        if company: return company, "name_address"
+    return None, None
 
 
 def upsert_lead(session: Session, lead: CompanyLead) -> UpsertResult:
     duplicate, matched_by = find_duplicate(session, lead)
     if duplicate:
-        _merge_enrichment(duplicate, lead)
+        _merge_enrichment(session, duplicate, lead)
         return UpsertResult(duplicate, False, matched_by)
 
     company = Company(
@@ -84,7 +82,8 @@ def upsert_lead(session: Session, lead: CompanyLead) -> UpsertResult:
         email=lead.email,
         company_phone=lead.phone,
         company_email=lead.email,
-        website=lead.website,
+        website=normalize_website(lead.website),
+        branches_count=lead.branches_count,
         inn=lead.inn,
         contact_person=lead.contact_person,
         decision_maker_name=lead.contact_person,
@@ -93,7 +92,7 @@ def upsert_lead(session: Session, lead: CompanyLead) -> UpsertResult:
         normalized_name=normalize_text(lead.company_name) or "",
         normalized_address=normalize_text(lead.address),
         normalized_phone=normalize_phone(lead.phone),
-        website_domain=website_domain(lead.website),
+        website_domain=website_domain(normalize_website(lead.website)),
         name_address_fingerprint=name_address_fingerprint(lead.company_name, lead.address),
     )
     try:
@@ -103,7 +102,7 @@ def upsert_lead(session: Session, lead: CompanyLead) -> UpsertResult:
     except IntegrityError:
         duplicate, matched_by = find_duplicate(session, lead)
         if duplicate:
-            _merge_enrichment(duplicate, lead)
+            _merge_enrichment(session, duplicate, lead)
             return UpsertResult(duplicate, False, matched_by or "unique_constraint")
         raise
     return UpsertResult(company, True)

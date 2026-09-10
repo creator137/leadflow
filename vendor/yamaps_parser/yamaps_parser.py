@@ -32,6 +32,7 @@ class Organization:
     lat: float | None
     phone: str | None
     site: str | None
+    branches_count: int | None
     social: str | None
     hours: str | None
     rating: float | None
@@ -52,6 +53,8 @@ def parse_org(item: dict[str, Any]) -> Organization:
     phones = item.get("phones") or []
     socials = item.get("socialLinks") or []
     urls = item.get("urls") or []
+    chain = item.get("chain") or {}
+    quantity_in_city = chain.get("quantityInCity")
     return Organization(
         id=item.get("id"),
         name=item.get("title"),
@@ -61,6 +64,7 @@ def parse_org(item: dict[str, Any]) -> Organization:
         lat=coords[1],
         phone=";".join(p.get("value", "") for p in phones) or None,
         site=_strip_query(urls[0]) if urls else None,
+        branches_count=(quantity_in_city if isinstance(quantity_in_city, int) and quantity_in_city > 0 else None),
         social=";".join(s.get("href", "") for s in socials) or None,
         hours=item.get("workingTimeText"),
         rating=rd.get("ratingValue"),

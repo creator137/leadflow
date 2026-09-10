@@ -59,5 +59,6 @@ class YandexMapsAdapter(SourceAdapter):
                 phone=org.phone,
                 email=org.email,
                 website=org.site,
+                branches_count=org.branches_count,
                 raw_data=raw,
             )

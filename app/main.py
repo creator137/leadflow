@@ -16,8 +16,9 @@ from sqlalchemy.orm import Session
 from app.config import get_settings, validate_production_secrets
 from app.db import SessionLocal, get_db
 from app.models import (
-    AIConfig, Campaign, Company, Direction, DirectionRun, EmailDelivery, EmailTemplate,
-    GoogleSheetsConfig, MailAccount, ParserRun, PhraseSearchRun, SheetRowMapping, SourceJob, Suppression, TrackedLink,
+    AIConfig, Campaign, Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord,
+    Direction, DirectionRun, EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun,
+    MailAccount, ParserRun, PhraseSearchRun, SheetRowMapping, SourceJob, Suppression, TrackedLink,
 )
 from app.schemas import (
     AIConfigCreate, AIConfigRead, CampaignCreate, CampaignRead, CampaignUpdate, CompanyRead, CompanyUpdate,
@@ -27,14 +28,17 @@ from app.schemas import (
     PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead, SourceJobCreate, SourceJobRead, SourceJobUpdate,
 )
 from app.services.collection import execute_job
+from app.services.analytics import analytics as build_analytics
 from app.services.company_enrichment import CompanyEnrichmentService
 from app.services.direction_pipeline import execute_direction_pipeline
+from app.services.data_quality import backfill_structured_business_fields
 from app.services.directions import archive_direction, create_direction, serialize_direction, update_direction
 from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_config, sync_companies, worksheet_from_config
 from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, execute_campaign, process_queue, render_template_parts
 from app.services.personalized import ConfiguredAIProvider, send_personalized
 from app.services.secrets import decrypt_secret, encrypt_secret
 from app.services.provenance import apply_field
+from app.services.user_errors import human_error
 from app.sources.phrase_search import execute_phrase_search
 
 app = FastAPI(title="LeadFlow", version="0.1.0")
@@ -45,6 +49,8 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.on_event("startup")
 def security_startup_check() -> None:
     validate_production_secrets(get_settings())
+    with SessionLocal() as session:
+        backfill_structured_business_fields(session)
 
 
 @app.middleware("http")
@@ -103,18 +109,52 @@ def companies(
     city: str | None = None,
     category: str | None = None,
     source: str | None = None,
+    direction: str | None = None,
+    has_website: bool | None = None,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     session: Session = Depends(get_db),
 ) -> list[Company]:
     query = select(Company).order_by(Company.collected_at.desc()).limit(limit).offset(offset)
+    if direction:
+        query = query.join(CompanyDirection).where(CompanyDirection.direction_id == direction)
     if city:
         query = query.where(Company.city == city)
     if category:
         query = query.where(Company.category == category)
     if source:
         query = query.where(Company.source == source)
+    if has_website is True:
+        query = query.where(Company.website.is_not(None))
+    elif has_website is False:
+        query = query.where(Company.website.is_(None))
     return list(session.scalars(query))
+
+
+@app.get("/api/companies/{company_id}/details")
+def company_details(company_id: str, session: Session = Depends(get_db)) -> dict[str, object]:
+    company = session.get(Company, company_id)
+    if not company:
+        raise HTTPException(404, "Компания не найдена")
+    return {
+        "company": CompanyRead.model_validate(company).model_dump(mode="json"),
+        "sources": [{"source": x.source, "source_url": x.source_url, "collected_at": x.collected_at}
+                    for x in session.scalars(select(CompanySourceRecord).where(CompanySourceRecord.company_id == company_id).order_by(CompanySourceRecord.collected_at.desc()))],
+        "changes": [{"field": x.field, "method": x.discovery_method, "source_url": x.source_url, "at": x.discovered_at}
+                    for x in session.scalars(select(CompanyFieldProvenance).where(CompanyFieldProvenance.company_id == company_id).order_by(CompanyFieldProvenance.discovered_at.desc()))],
+        "emails": [DeliveryRead.model_validate(x).model_dump(mode="json") for x in session.scalars(select(EmailDelivery).where(EmailDelivery.company_id == company_id).order_by(EmailDelivery.created_at.desc()))],
+    }
+
+
+@app.get("/api/analytics")
+def analytics_api(
+    date_from: datetime | None = None, date_to: datetime | None = None,
+    direction: str | None = None, city: str | None = None, source: str | None = None,
+    mailbox: str | None = None, template: str | None = None,
+    session: Session = Depends(get_db),
+) -> dict[str, object]:
+    return build_analytics(session, date_from=date_from, date_to=date_to, direction=direction, city=city,
+                           source=source, mailbox=mailbox, template=template)
 
 
 @app.patch("/api/companies/{company_id}", response_model=CompanyRead)
@@ -495,7 +535,10 @@ def preview_template(template_id: str, payload: TemplatePreview, session: Sessio
 def test_send_template(template_id: str, payload: TemplateTestSend, session: Session = Depends(get_db)) -> EmailDelivery:
     template, company, account = session.get(EmailTemplate, template_id), session.get(Company, payload.company_id), session.get(MailAccount, payload.mailbox_id)
     if not template or not company or not account: raise HTTPException(404, "Template, company, or mailbox not found")
-    delivery = build_delivery(session, company, account, template, get_settings(), send_mode="test", recipient_override=payload.recipient_email)
+    try:
+        delivery = build_delivery(session, company, account, template, get_settings(), send_mode="test", recipient_override=payload.recipient_email)
+    except ValueError as exc:
+        raise HTTPException(409, human_error(exc)) from exc
     process_queue(session, get_settings(), "api-test-send", 1)
     session.refresh(delivery); return delivery
 
@@ -570,7 +613,7 @@ def manual_send(company_id: str, payload: ManualSendCreate, session: Session = D
     if not company or not account or not template: raise HTTPException(404, "Company, mailbox, or template not found")
     try:
         return build_delivery(session, company, account, template, get_settings(), direction_id=payload.direction_id, send_mode="manual", overrides=payload.model_dump(exclude={"mailbox_id", "template_id", "direction_id"}))
-    except ValueError as exc: raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc: raise HTTPException(409, human_error(exc)) from exc
 
 
 @app.post("/api/companies/{company_id}/personalization-preview")
@@ -671,7 +714,14 @@ def sync_sheet(config_id: str, session: Session = Depends(get_db)) -> dict[str, 
     config = session.get(GoogleSheetsConfig, config_id)
     if not config:
         raise HTTPException(404, "Google Sheets config not found")
-    return sync_companies(session, config)
+    try:
+        return sync_companies(session, config)
+    except Exception as exc:
+        session.rollback()
+        session.add(GoogleSyncRun(config_id=config.id, status="failed", error_type=exc.__class__.__name__,
+                                  error_message=human_error(exc), finished_at=datetime.now(timezone.utc)))
+        session.commit()
+        raise HTTPException(502, human_error(exc)) from exc
 
 
 @app.post("/api/directions/{direction_id}/sync")
@@ -682,7 +732,15 @@ def sync_direction_sheet(direction_id: str, session: Session = Depends(get_db)) 
     config = _active_sheets_config(session)
     if not config:
         raise HTTPException(409, "Active Google Sheets configuration not found")
-    return GoogleSheetsSyncService(session, config).sync_direction(direction)
+    try:
+        return GoogleSheetsSyncService(session, config).sync_direction(direction)
+    except Exception as exc:
+        session.rollback()
+        session.add(GoogleSyncRun(config_id=config.id, direction_id=direction.id, status="failed",
+                                  error_type=exc.__class__.__name__, error_message=human_error(exc),
+                                  finished_at=datetime.now(timezone.utc)))
+        session.commit()
+        raise HTTPException(502, human_error(exc)) from exc
 
 
 @app.get("/api/google-sheets/status")
@@ -700,6 +758,7 @@ def sheets_status(session: Session = Depends(get_db)) -> dict[str, object]:
         "service_account_email": service_account_email,
         "mapped_rows": session.scalar(select(func.count()).select_from(SheetRowMapping).where(SheetRowMapping.spreadsheet_id == config.spreadsheet_id)) if config else 0,
         "last_sync_at": session.scalar(select(func.max(SheetRowMapping.last_synced_at)).where(SheetRowMapping.spreadsheet_id == config.spreadsheet_id)) if config else None,
+        "spreadsheet_url": f"https://docs.google.com/spreadsheets/d/{config.spreadsheet_id}" if config else None,
     }
 
 
@@ -714,7 +773,7 @@ def test_sheets_connection(session: Session = Depends(get_db)) -> dict[str, obje
         spreadsheet = worksheet.spreadsheet
         return {"connected": True, "spreadsheet_title": spreadsheet.title, "tabs": [item.title for item in spreadsheet.worksheets()]}
     except Exception as exc:
-        raise HTTPException(502, f"Google Sheets connection failed ({exc.__class__.__name__})") from exc
+        raise HTTPException(502, human_error(exc)) from exc
 
 
 @app.get("/api/ai-settings", response_model=list[AIConfigRead])

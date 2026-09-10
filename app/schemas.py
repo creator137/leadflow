@@ -53,6 +53,7 @@ class CompanyUpdate(BaseModel):
     communication_started_at: datetime | None = None
     action: str | None = None
     result: str | None = None
+    website: str | None = None
     manually_blocked: bool | None = None
 
 

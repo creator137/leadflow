@@ -149,6 +149,31 @@ class CompanySourceRecord(Base):
     )
 
 
+class SearchObservation(Base):
+    """One factual parser result, retained even when it is a duplicate."""
+    __tablename__ = "search_observations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("direction_runs.id", ondelete="CASCADE"), index=True)
+    direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), index=True)
+    company_id: Mapped[str | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), index=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    query: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    city: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    source_external_id: Mapped[str | None] = mapped_column(String(255))
+    source_url: Mapped[str | None] = mapped_column(Text)
+    is_new: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
+    matched_by: Mapped[str | None] = mapped_column(String(64))
+    has_phone: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_email: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_website: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_branches_count: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error_type: Mapped[str | None] = mapped_column(String(255))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class CompanyFieldProvenance(Base):
     __tablename__ = "company_field_provenance"
 
@@ -172,11 +197,30 @@ class SheetRowMapping(Base):
     sheet_tab: Mapped[str] = mapped_column(String(100), nullable=False)
     sheet_row: Mapped[int] = mapped_column(Integer, nullable=False)
     last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_synced_values: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     __table_args__ = (
         UniqueConstraint("company_id", "direction_id", "spreadsheet_id", name="uq_sheet_company_direction"),
         UniqueConstraint("spreadsheet_id", "sheet_tab", "sheet_row", name="uq_sheet_row"),
     )
+
+
+class GoogleSyncRun(Base):
+    __tablename__ = "google_sync_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    config_id: Mapped[str] = mapped_column(ForeignKey("google_sheets_config.id", ondelete="CASCADE"), index=True)
+    direction_id: Mapped[str | None] = mapped_column(ForeignKey("directions.id", ondelete="SET NULL"), index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    rows_inserted: Mapped[int] = mapped_column(Integer, default=0)
+    rows_updated: Mapped[int] = mapped_column(Integer, default=0)
+    rows_skipped: Mapped[int] = mapped_column(Integer, default=0)
+    manual_changes: Mapped[int] = mapped_column(Integer, default=0)
+    conflicts: Mapped[int] = mapped_column(Integer, default=0)
+    error_type: Mapped[str | None] = mapped_column(String(255))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class DirectionRun(Base):

@@ -91,6 +91,8 @@ class TwoGisAdapter(SourceAdapter):
             email = _first_contact(item, "email")
             website = _first_contact(item, "website")
             rubrics = item.get("rubrics") or []
+            organization = item.get("org") or {}
+            branch_count = organization.get("branch_count")
             city = next(
                 (part.get("name") for part in item.get("adm_div") or [] if part.get("type") == "city"),
                 spec.city,
@@ -106,5 +108,6 @@ class TwoGisAdapter(SourceAdapter):
                 phone=(phone or {}).get("value") or (phone or {}).get("text"),
                 email=(email or {}).get("value") or (email or {}).get("text"),
                 website=(website or {}).get("url") or (website or {}).get("text"),
+                branches_count=(branch_count if isinstance(branch_count, int) and branch_count > 0 else None),
                 raw_data=item,
             )

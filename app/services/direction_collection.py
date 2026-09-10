@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import (
     CompanyDirection, CompanySourceRecord, Direction, DirectionLocation, DirectionRun,
-    DirectionSearchQuery, DirectionSource,
+    DirectionSearchQuery, DirectionSource, SearchObservation,
 )
 from app.services.dedup import upsert_lead
 from app.services.provenance import apply_field
@@ -47,8 +48,10 @@ def _parser_provenance(session: Session, company, lead, region: str | None) -> N
     for field, value in (
         ("region", region),
         ("company_email", lead.email),
-        ("company_phone", lead.phone),
-        ("inn", lead.inn),
+        ("company_phone", company.company_phone if lead.phone else None),
+        ("inn", company.inn if lead.inn else None),
+        ("website", company.website if lead.website else None),
+        ("branches_count", lead.branches_count),
     ):
         if value:
             apply_field(
@@ -105,6 +108,7 @@ def execute_direction(
         combo_target = max(1, math.ceil(remaining / (len(combinations) - combo_index)))
         resuming = combo_index == start_combo and bool(resume_external_id or resume_source_url)
         combo_completed = False
+        combo_started = time.monotonic()
         try:
             for lead in adapter.collect(spec):
                 if resuming:
@@ -130,6 +134,15 @@ def execute_direction(
                 else:
                     session.add(CompanyDirection(company_id=result.company.id, direction_id=direction.id))
                     run.inserted += 1
+                session.add(SearchObservation(
+                    run_id=run.id, direction_id=direction.id, company_id=result.company.id,
+                    source=lead.source, query=query.query, city=location.city,
+                    source_external_id=lead.source_external_id, source_url=lead.source_url,
+                    is_new=not bool(association), matched_by=result.matched_by,
+                    has_phone=bool(lead.phone), has_email=bool(lead.email),
+                    has_website=bool(lead.website), has_branches_count=lead.branches_count is not None,
+                    duration_ms=int((time.monotonic() - combo_started) * 1000),
+                ))
                 run.checkpoint = {
                     "combo_index": combo_index,
                     "last_external_id": lead.source_external_id,
@@ -148,12 +161,24 @@ def execute_direction(
             blocked += 1
             run.errors += 1
             run.message = str(exc)
+            session.add(SearchObservation(
+                run_id=run.id, direction_id=direction.id, source=source.source,
+                query=query.query, city=location.city, is_new=False,
+                error_type=exc.__class__.__name__, error_message=str(exc),
+                duration_ms=int((time.monotonic() - combo_started) * 1000),
+            ))
         except Exception as exc:
             session.rollback()
             run = session.get(DirectionRun, run.id)
             failed += 1
             run.errors += 1
             run.message = str(exc)
+            session.add(SearchObservation(
+                run_id=run.id, direction_id=direction.id, source=source.source,
+                query=query.query, city=location.city, is_new=False,
+                error_type=exc.__class__.__name__, error_message=str(exc),
+                duration_ms=int((time.monotonic() - combo_started) * 1000),
+            ))
         if combo_completed:
             run.checkpoint = {"combo_index": combo_index + 1}
         session.commit()

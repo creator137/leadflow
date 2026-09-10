@@ -39,6 +39,7 @@ class CompanyLead:
     phone: str | None = None
     email: str | None = None
     website: str | None = None
+    branches_count: int | None = None
     inn: str | None = None
     contact_person: str | None = None
     collected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -51,4 +52,3 @@ class SourceAdapter(ABC):
     @abstractmethod
     def collect(self, spec: SearchSpec) -> Iterable[CompanyLead]:
         raise NotImplementedError
-

@@ -15,10 +15,16 @@ class FakeWorksheet:
         return [row[:] for row in self.rows]
 
     def update(self, *, range_name, values):
-        start = int(range_name.split(":", 1)[0][1:])
+        from gspread.utils import a1_to_rowcol
+        start, column = a1_to_rowcol(range_name.split(":", 1)[0])
         while len(self.rows) < start:
             self.rows.append([])
-        self.rows[start - 1] = values[0][:]
+        if column == 1 and len(values[0]) > 1:
+            self.rows[start - 1] = values[0][:]
+        else:
+            while len(self.rows[start - 1]) < column:
+                self.rows[start - 1].append("")
+            self.rows[start - 1][column - 1] = values[0][0]
 
     def hide_columns(self, *_):
         pass
@@ -65,6 +71,7 @@ def test_realistic_second_row_schema_and_email_status() -> None:
     assert schema.fields["company_email"] == 7 and schema.fields["decision_maker_email"] == 10
     assert schema.fields["company_phone"] == 8 and schema.fields["decision_maker_phone"] == 11
     assert schema.email_status_column == 12 and schema.leadflow_id_column == 16
+    assert "website" not in schema.fields
 
 
 def test_sheet_identity_update_and_manual_preservation() -> None:
@@ -77,11 +84,12 @@ def test_sheet_identity_update_and_manual_preservation() -> None:
         first = service.sync_direction(direction, worksheet=worksheet)
         assert first == {"imported": 0, "inserted": 1, "updated": 0, "total": 1}
         assert len(worksheet.rows) == 2
-        assert worksheet.rows[1][13] == company.id
+        assert worksheet.rows[1][14] == company.id
+        assert worksheet.rows[0][11] == "Сайт"
 
         worksheet.rows[1][8] = "Тестовый Менеджер"
-        worksheet.rows[1][11] = "Связаться позже"
-        worksheet.rows[1][12] = "Перезвонить"
+        worksheet.rows[1][12] = "Связаться позже"
+        worksheet.rows[1][13] = "Перезвонить"
         second = service.sync_direction(direction, worksheet=worksheet)
         assert second["inserted"] == 0 and second["updated"] == 1
         assert len(worksheet.rows) == 2
@@ -113,8 +121,8 @@ def test_row_movement_is_found_by_leadflow_id() -> None:
         company.company_phone = "+7 000 000-00-00"
         result = service.sync_direction(direction, worksheet=worksheet)
         assert result["inserted"] == 0 and result["updated"] == 1
-        matches = [row for row in worksheet.rows if len(row) > 13 and row[13] == company.id]
-        assert len(matches) == 1 and matches[0][7] == "+7 999 111-22-33"  # manual sheet value wins
+        matches = [row for row in worksheet.rows if len(row) > 14 and row[14] == company.id]
+        assert len(matches) == 1 and matches[0][7] == "+7 000 000-00-00"  # unchanged system value updates after row movement
 
 
 def test_duplicate_leadflow_id_is_rejected() -> None:
@@ -142,3 +150,83 @@ def test_transient_google_error_is_retried(monkeypatch) -> None:
         return "ok"
     monkeypatch.setattr("app.services.google_sheets.time.sleep", lambda _: None)
     assert _retry(operation) == "ok" and attempts == 3
+
+
+def test_google_auth_transport_error_is_retried(monkeypatch) -> None:
+    from google.auth.exceptions import TransportError
+    attempts = 0
+    def operation():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TransportError("temporary")
+        return "ok"
+    monkeypatch.setattr("app.services.google_sheets.time.sleep", lambda _: None)
+    assert _retry(operation) == "ok" and attempts == 2
+
+
+def test_existing_sheet_gets_website_column_and_preserves_manual_value() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction, company, config = setup_company(session)
+        company.website = "https://parser.example"
+        worksheet = FakeWorksheet()
+        worksheet.rows = [["Наименование клиента", "Город", "Адрес", "LeadFlow ID"]]
+        service = GoogleSheetsSyncService(session, config)
+        service.sync_direction(direction, worksheet=worksheet)
+        assert worksheet.rows[0][4] == "Кол-во филиалов"
+        assert worksheet.rows[0][5] == "Сайт"
+        assert worksheet.rows[1][5] == "https://parser.example"
+        worksheet.rows[1][5] = "https://www.manual.example/"
+        service.sync_direction(direction, worksheet=worksheet)
+        assert company.website == "https://manual.example"
+        assert worksheet.rows[1][5] == "https://www.manual.example/"
+        provenance_count = session.query(CompanyFieldProvenance).filter_by(
+            company_id=company.id, field="website", discovery_method="manual",
+        ).count()
+        service.sync_direction(direction, worksheet=worksheet)
+        assert session.query(CompanyFieldProvenance).filter_by(
+            company_id=company.id, field="website", discovery_method="manual",
+        ).count() == provenance_count
+
+
+def test_unchanged_system_value_can_be_updated_after_snapshot() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction, company, config = setup_company(session)
+        company.website = "https://old.example"
+        worksheet = FakeWorksheet()
+        service = GoogleSheetsSyncService(session, config)
+        service.sync_direction(direction, worksheet=worksheet)
+        assert worksheet.rows[1][11] == "https://old.example"
+        company.website = "https://new.example"
+        service.sync_direction(direction, worksheet=worksheet)
+        assert worksheet.rows[1][11] == "https://new.example"
+
+
+def test_manual_value_can_be_changed_again_after_snapshot() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction, company, config = setup_company(session)
+        worksheet = FakeWorksheet()
+        service = GoogleSheetsSyncService(session, config)
+        service.sync_direction(direction, worksheet=worksheet)
+
+        worksheet.rows[1][8] = "Первый менеджер"
+        service.sync_direction(direction, worksheet=worksheet)
+        assert company.decision_maker_name == "Первый менеджер"
+
+        worksheet.rows[1][8] = "Новый менеджер"
+        service.sync_direction(direction, worksheet=worksheet)
+        assert company.decision_maker_name == "Новый менеджер"
+        assert worksheet.rows[1][8] == "Новый менеджер"
+
+        assert apply_field(
+            session, company, "decision_maker_name", "Менеджер из LeadFlow",
+            discovery_method="manual", confidence=1.0,
+        ) is True
+        service.sync_direction(direction, worksheet=worksheet)
+        assert worksheet.rows[1][8] == "Менеджер из LeadFlow"
