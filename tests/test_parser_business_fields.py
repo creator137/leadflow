@@ -1,14 +1,36 @@
+from types import SimpleNamespace
+
 from app.sources.base import SearchSpec
 from app.sources.yandex_maps.adapter import YandexMapsAdapter
 
 
 def test_yandex_structured_branch_count(monkeypatch) -> None:
     import yamaps_parser
-    item = {"id": "1", "title": "Сеть", "type": "business", "urls": ["https://www.example.ru/?yclid=1"], "chain": {"quantityInCity": 17}}
-    org = yamaps_parser.parse_org(item)
+    org = SimpleNamespace(
+        id="1",
+        name="Сеть",
+        category="ресторан",
+        address=None,
+        phone=None,
+        email=None,
+        site="https://www.example.ru/",
+        branches_count=17,
+        url=None,
+    )
     monkeypatch.setattr(yamaps_parser, "geocode", lambda _: {"center": (1, 1), "span": (1, 1), "bbox": (0, 0, 2, 2)})
     monkeypatch.setattr(yamaps_parser, "search_all_browser", lambda *a, **k: [org])
-    lead = next(iter(YandexMapsAdapter().collect(SearchSpec(category="ресторан", city="Москва", limit=1, options={"use_grid": False}))))
+    lead = next(
+        iter(
+            YandexMapsAdapter().collect(
+                SearchSpec(
+                    category="ресторан",
+                    city="Москва",
+                    limit=1,
+                    options={"use_grid": False, "force_browser": True},
+                )
+            )
+        )
+    )
     assert lead.branches_count == 17 and lead.website == "https://www.example.ru/"
 
 
