@@ -30,6 +30,7 @@ from app.schemas import (
 )
 from app.services.collection import execute_job
 from app.services.analytics import analytics as build_analytics
+from app.services.ai_usage import ai_usage_details, ai_usage_journal
 from app.services.company_enrichment import CompanyEnrichmentService
 from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.data_quality import backfill_structured_business_fields
@@ -162,6 +163,35 @@ def analytics_api(
 ) -> dict[str, object]:
     return build_analytics(session, date_from=date_from, date_to=date_to, direction=direction, city=city,
                            source=source, mailbox=mailbox, template=template)
+
+
+@app.get("/api/analytics/ai-usage")
+def ai_usage_api(
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    company_id: str | None = None,
+    operation: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    session: Session = Depends(get_db),
+) -> dict[str, object]:
+    return ai_usage_journal(
+        session,
+        date_from=date_from,
+        date_to=date_to,
+        company_id=company_id,
+        operation=operation,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/api/analytics/ai-usage/{log_id}")
+def ai_usage_details_api(log_id: str, session: Session = Depends(get_db)) -> dict[str, object]:
+    result = ai_usage_details(session, log_id)
+    if result is None:
+        raise HTTPException(404, "Запись расхода ИИ не найдена.")
+    return result
 
 
 @app.patch("/api/companies/{company_id}", response_model=CompanyRead)
