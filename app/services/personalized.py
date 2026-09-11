@@ -120,7 +120,10 @@ def send_personalized(
     fragments = PersonalizationFragments.model_validate(log.response_data)
     rendered = _render(template, company, account, fragments)
     rendered.update({key: value for key, value in (overrides or {}).items() if value is not None})
-    return build_delivery(session, company, account, template, settings, send_mode="personalized", overrides=rendered)
+    return build_delivery(
+        session, company, account, template, settings, send_mode="personalized", overrides=rendered,
+        idempotency_key=f"personalized:{company.id}:{request_key}",
+    )
 
 
 # Compatibility aliases for code importing the former provider. They never accept credentials.

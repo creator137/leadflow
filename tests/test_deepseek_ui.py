@@ -23,3 +23,7 @@ def test_personalized_send_requires_preview_confirmation_in_ui() -> None:
     assert "personalization-preview" in javascript
     assert "send-personalized" in javascript
     assert "Проверьте его перед отправкой" in javascript
+    assert "Подготовить персональное КП" in html
+    assert 'id="sendDraftId"' in html
+    assert "personalization-drafts" in javascript
+    assert "Подтвердить отправку" in html

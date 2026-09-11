@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
 import time
@@ -47,6 +48,7 @@ MANUAL_FIELDS = {
     "company_phone", "decision_maker_name", "decision_maker_email", "decision_maker_phone", "website", "inn", "action", "result",
 }
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 def _normalized(value: str) -> str:
@@ -318,4 +320,12 @@ def sync_companies(session: Session, config: GoogleSheetsConfig) -> dict[str, in
     for direction in session.scalars(select(Direction).where(Direction.archived_at.is_(None))):
         result = service.sync_direction(direction)
         for key in totals: totals[key] += result[key]
+        # The command is read from the actual row by stable LeadFlow ID. It only
+        # prepares a draft; sending always requires confirmation in the admin UI.
+        from app.services.sheet_personalization import process_sheet_personalization_triggers
+        try:
+            process_sheet_personalization_triggers(session, config, direction, get_settings())
+        except Exception:
+            session.rollback()
+            logger.exception("Google Sheets personalization trigger failed for direction %s", direction.id)
     return totals

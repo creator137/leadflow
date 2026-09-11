@@ -123,7 +123,11 @@ def is_suppressed(session: Session, recipient: str) -> bool:
     return bool(session.scalar(select(Suppression.email).where(Suppression.email == normalize_email(recipient), Suppression.active.is_(True))))
 
 
-def build_delivery(session: Session, company: Company, account: MailAccount, template: EmailTemplate, settings: Settings, *, campaign: Campaign | None = None, direction_id: str | None = None, send_mode: str = "manual", overrides: dict[str, str | None] | None = None, extra: dict[str, str] | None = None, recipient_override: str | None = None) -> EmailDelivery:
+def build_delivery(session: Session, company: Company, account: MailAccount, template: EmailTemplate, settings: Settings, *, campaign: Campaign | None = None, direction_id: str | None = None, send_mode: str = "manual", overrides: dict[str, str | None] | None = None, extra: dict[str, str] | None = None, recipient_override: str | None = None, idempotency_key: str | None = None) -> EmailDelivery:
+    if idempotency_key:
+        existing = session.scalar(select(EmailDelivery).where(EmailDelivery.idempotency_key == idempotency_key))
+        if existing:
+            return existing
     recipient = normalize_email(recipient_override or company.decision_maker_email or company.company_email or company.email or "")
     if not recipient: raise ValueError("Company has no recipient email")
     if is_suppressed(session, recipient) or company.manually_blocked: raise ValueError("Recipient is suppressed")
@@ -142,6 +146,7 @@ def build_delivery(session: Session, company: Company, account: MailAccount, tem
         company_id=company.id, mailbox_id=account.id, template_id=template.id, recipient_email=recipient,
         recipient_name=company.decision_maker_name, subject=subject, html_body="", text_body=text or "", send_mode=send_mode,
         status="queued", tracking_token=secrets.token_urlsafe(32), unsubscribe_token=secrets.token_urlsafe(32), next_attempt_at=now_utc(),
+        idempotency_key=idempotency_key,
     )
     session.add(delivery); session.flush()
     delivery.html_body = add_tracking(session, delivery, html, settings)

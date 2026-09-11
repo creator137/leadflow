@@ -14,6 +14,8 @@ from app.services.collection import execute_job
 from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.imap_monitor import poll_mailbox
 from app.services.mailing import execute_campaign, process_queue
+from app.services.google_sheets import active_sheets_config
+from app.services.sheet_personalization import process_sheet_personalization_triggers
 
 logging.basicConfig(level=get_settings().log_level)
 logger = logging.getLogger(__name__)
@@ -100,6 +102,22 @@ def drain_email_queue() -> None:
             logger.info("Email queue processed: %s", result)
 
 
+def poll_sheet_personalizations() -> None:
+    with SessionLocal() as session:
+        config = active_sheets_config(session, get_settings())
+        if not config:
+            return
+        directions = list(session.scalars(select(Direction).where(
+            Direction.active.is_(True), Direction.archived_at.is_(None),
+        )))
+        for direction in directions:
+            try:
+                process_sheet_personalization_triggers(session, config, direction, get_settings())
+            except Exception:
+                session.rollback()
+                logger.exception("Google Sheets personalization polling failed for direction %s", direction.id)
+
+
 def refresh_campaigns() -> None:
     with SessionLocal() as session:
         campaigns = list(session.scalars(select(Campaign).where(Campaign.active.is_(True))))
@@ -129,6 +147,7 @@ def main() -> None:
     scheduler.add_job(refresh_campaigns, "interval", seconds=60, id="refresh-campaigns", replace_existing=True)
     scheduler.add_job(poll_imap, "interval", minutes=5, id="imap", replace_existing=True, max_instances=1)
     scheduler.add_job(drain_email_queue, "interval", seconds=10, id="email-queue", replace_existing=True, max_instances=1)
+    scheduler.add_job(poll_sheet_personalizations, "interval", seconds=60, id="sheet-personalization", replace_existing=True, max_instances=1)
     scheduler.start()
 
 

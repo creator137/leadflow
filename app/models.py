@@ -350,6 +350,7 @@ class EmailDelivery(Base):
     html_body: Mapped[str] = mapped_column(Text, nullable=False)
     text_body: Mapped[str] = mapped_column(Text, default="")
     send_mode: Mapped[str] = mapped_column(String(32), default="campaign")
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     tracking_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     unsubscribe_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
@@ -489,6 +490,28 @@ class AIRequestLog(Base):
     cache_hit: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     error_code: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class SheetPersonalizationDraft(Base):
+    __tablename__ = "sheet_personalization_drafts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
+    direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), nullable=False, index=True)
+    config_id: Mapped[str] = mapped_column(ForeignKey("google_sheets_config.id", ondelete="CASCADE"), nullable=False)
+    template_id: Mapped[str] = mapped_column(ForeignKey("email_templates.id"), nullable=False)
+    mailbox_id: Mapped[str | None] = mapped_column(ForeignKey("mail_accounts.id"))
+    command_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    request_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="preparing", index=True)
+    subject: Mapped[str | None] = mapped_column(Text)
+    html_body: Mapped[str | None] = mapped_column(Text)
+    text_body: Mapped[str | None] = mapped_column(Text)
+    facts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    delivery_id: Mapped[str | None] = mapped_column(ForeignKey("email_deliveries.id", ondelete="SET NULL"), unique=True)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class PhraseSearchRun(Base):

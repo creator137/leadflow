@@ -18,7 +18,7 @@ from app.db import SessionLocal, get_db
 from app.models import (
     AIConfig, Campaign, Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord,
     Direction, DirectionRun, EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun,
-    MailAccount, ParserRun, PhraseSearchRun, SheetRowMapping, SourceJob, Suppression, TrackedLink,
+    MailAccount, ParserRun, PhraseSearchRun, SheetPersonalizationDraft, SheetRowMapping, SourceJob, Suppression, TrackedLink,
 )
 from app.schemas import (
     AIConfigCreate, AIConfigRead, CampaignCreate, CampaignRead, CampaignUpdate, CompanyRead, CompanyUpdate,
@@ -38,6 +38,7 @@ from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_co
 from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, execute_campaign, process_queue, render_template_parts
 from app.services.deepseek import DeepSeekClient, DeepSeekError, ai_settings as get_ai_settings
 from app.services.personalized import PersonalizationFragments, prepare_personalization, send_personalized
+from app.services.sheet_personalization import send_sheet_draft, serialize_draft
 from app.services.secrets import decrypt_secret, encrypt_secret
 from app.services.provenance import apply_field
 from app.services.user_errors import human_error
@@ -138,6 +139,9 @@ def company_details(company_id: str, session: Session = Depends(get_db)) -> dict
     company = session.get(Company, company_id)
     if not company:
         raise HTTPException(404, "Компания не найдена")
+    draft = session.scalar(select(SheetPersonalizationDraft).where(
+        SheetPersonalizationDraft.company_id == company_id,
+    ).order_by(SheetPersonalizationDraft.created_at.desc()).limit(1))
     return {
         "company": CompanyRead.model_validate(company).model_dump(mode="json"),
         "sources": [{"source": x.source, "source_url": x.source_url, "collected_at": x.collected_at}
@@ -145,6 +149,7 @@ def company_details(company_id: str, session: Session = Depends(get_db)) -> dict
         "changes": [{"field": x.field, "method": x.discovery_method, "source_url": x.source_url, "at": x.discovered_at}
                     for x in session.scalars(select(CompanyFieldProvenance).where(CompanyFieldProvenance.company_id == company_id).order_by(CompanyFieldProvenance.discovered_at.desc()))],
         "emails": [DeliveryRead.model_validate(x).model_dump(mode="json") for x in session.scalars(select(EmailDelivery).where(EmailDelivery.company_id == company_id).order_by(EmailDelivery.created_at.desc()))],
+        "personalization_draft": serialize_draft(draft) if draft else None,
     }
 
 
@@ -661,6 +666,28 @@ def personalized_send(company_id: str, payload: PersonalizedSendCreate, session:
     try:
         return send_personalized(
             session, company, account, template, payload.request_key, get_settings(),
+            overrides={"subject": payload.subject, "html_body": payload.html_body, "text_body": payload.text_body},
+        )
+    except ValueError as exc:
+        raise HTTPException(409, human_error(exc)) from exc
+
+
+@app.get("/api/personalization-drafts/{draft_id}")
+def personalization_draft(draft_id: str, session: Session = Depends(get_db)) -> dict[str, object]:
+    draft = session.get(SheetPersonalizationDraft, draft_id)
+    if not draft:
+        raise HTTPException(404, "Готовое персональное письмо не найдено.")
+    return serialize_draft(draft)
+
+
+@app.post("/api/personalization-drafts/{draft_id}/send", response_model=DeliveryRead, status_code=202)
+def send_personalization_draft(draft_id: str, payload: PersonalizedSendCreate, session: Session = Depends(get_db)) -> EmailDelivery:
+    draft = session.get(SheetPersonalizationDraft, draft_id)
+    if not draft or draft.template_id != payload.template_id or draft.mailbox_id != payload.mailbox_id:
+        raise HTTPException(409, "Используйте почтовый ящик и шаблон из готового предпросмотра.")
+    try:
+        return send_sheet_draft(
+            session, draft_id, get_settings(),
             overrides={"subject": payload.subject, "html_body": payload.html_body, "text_body": payload.text_body},
         )
     except ValueError as exc:
