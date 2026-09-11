@@ -25,7 +25,8 @@ from app.schemas import (
     DeliveryRead, DirectionCreate, DirectionRead, DirectionRunRead, DirectionUpdate, EmailTemplateCreate,
     EmailTemplateRead, EmailTemplateUpdate, GoogleSheetsConfigCreate, GoogleSheetsConfigRead, MailAccountCreate,
     MailAccountRead, MailAccountUpdate, ManualSendCreate, ParserRunRead, SuppressionCreate, TemplatePreview, TemplateTestSend,
-    PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead, SourceJobCreate, SourceJobRead, SourceJobUpdate,
+    AISettingsUpdate, PersonalizationPreviewCreate, PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead,
+    SourceJobCreate, SourceJobRead, SourceJobUpdate,
 )
 from app.services.collection import execute_job
 from app.services.analytics import analytics as build_analytics
@@ -35,7 +36,8 @@ from app.services.data_quality import backfill_structured_business_fields
 from app.services.directions import archive_direction, create_direction, serialize_direction, update_direction
 from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_config, sync_companies, worksheet_from_config
 from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, execute_campaign, process_queue, render_template_parts
-from app.services.personalized import ConfiguredAIProvider, send_personalized
+from app.services.deepseek import DeepSeekClient, DeepSeekError, ai_settings as get_ai_settings
+from app.services.personalized import PersonalizationFragments, prepare_personalization, send_personalized
 from app.services.secrets import decrypt_secret, encrypt_secret
 from app.services.provenance import apply_field
 from app.services.user_errors import human_error
@@ -161,7 +163,7 @@ def analytics_api(
 def update_company(company_id: str, payload: CompanyUpdate, session: Session = Depends(get_db)) -> Company:
     company = session.get(Company, company_id)
     if not company:
-        raise HTTPException(404, "Company not found")
+        raise HTTPException(404, "Компания не найдена.")
     for key, value in payload.model_dump(exclude_unset=True).items():
         canonical = {"email": "company_email", "contact_person": "decision_maker_name"}.get(key, key)
         if canonical == "manually_blocked":
@@ -263,14 +265,23 @@ def resume_direction(run_id: str, tasks: BackgroundTasks, session: Session = Dep
 
 
 @app.post("/api/companies/{company_id}/enrich")
-def enrich_company(company_id: str, use_ai: bool = False, session: Session = Depends(get_db)) -> dict[str, int]:
+def enrich_company(company_id: str, session: Session = Depends(get_db)) -> dict[str, object]:
     company = session.get(Company, company_id)
     if not company:
         raise HTTPException(404, "Company not found")
-    ai_config = session.scalar(select(AIConfig).where(AIConfig.active.is_(True)).limit(1)) if use_ai else None
-    if use_ai and not ai_config:
-        raise HTTPException(409, "Active AI configuration not found")
-    return CompanyEnrichmentService(session).enrich(company, ai_config=ai_config)
+    result = CompanyEnrichmentService(session, get_settings()).enrich(company, use_ai=True)
+    config = _active_sheets_config(session)
+    synced: dict[str, int] | None = None
+    if config and result.get("deterministic", 0) + result.get("ai", 0) > 0:
+        direction = session.scalar(select(Direction).join(CompanyDirection).where(CompanyDirection.company_id == company.id).limit(1))
+        if direction:
+            try:
+                synced = GoogleSheetsSyncService(session, config).sync_direction(direction)
+            except Exception as exc:
+                session.rollback()
+                result["sheets_message"] = human_error(exc)
+    result["sheets"] = synced
+    return result
 
 
 @app.get("/api/dashboard")
@@ -617,12 +628,16 @@ def manual_send(company_id: str, payload: ManualSendCreate, session: Session = D
 
 
 @app.post("/api/companies/{company_id}/personalization-preview")
-def personalization_preview(company_id: str, session: Session = Depends(get_db)) -> dict[str, str]:
+def personalization_preview(company_id: str, payload: PersonalizationPreviewCreate, session: Session = Depends(get_db)) -> dict[str, object]:
     company = session.get(Company, company_id)
-    if not company: raise HTTPException(404, "Company not found")
-    config = session.scalar(select(AIConfig).where(AIConfig.active.is_(True)).limit(1))
-    if not config: raise HTTPException(409, "AI provider is not configured")
-    return {"personalized_text": ConfiguredAIProvider(config).generate(company)}
+    template = session.get(EmailTemplate, payload.template_id)
+    account = session.get(MailAccount, payload.mailbox_id) if payload.mailbox_id else None
+    if not company or not template or (payload.mailbox_id and not account):
+        raise HTTPException(404, "Компания, шаблон или почтовый ящик не найден.")
+    try:
+        return prepare_personalization(session, company, template, get_settings(), account=account, regenerate=payload.regenerate)
+    except DeepSeekError as exc:
+        raise HTTPException(409 if exc.code in {"not_configured", "disabled", "daily_limit"} else 502, str(exc)) from exc
 
 
 @app.get("/api/suppressions")
@@ -641,13 +656,15 @@ def personalized_send(company_id: str, payload: PersonalizedSendCreate, session:
     company = session.get(Company, company_id)
     account = session.get(MailAccount, payload.mailbox_id)
     template = session.get(EmailTemplate, payload.template_id)
-    ai_config = session.get(AIConfig, payload.ai_config_id)
-    if not company or not account or not template or not ai_config:
-        raise HTTPException(404, "Company, mailbox, template, or AI config not found")
+    if not company or not account or not template:
+        raise HTTPException(404, "Компания, почтовый ящик или шаблон не найден.")
     try:
-        return send_personalized(session, company, account, template, ai_config, get_settings())
+        return send_personalized(
+            session, company, account, template, payload.request_key, get_settings(),
+            overrides={"subject": payload.subject, "html_body": payload.html_body, "text_body": payload.text_body},
+        )
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(409, human_error(exc)) from exc
 
 
 PIXEL = bytes.fromhex("47494638396101000100800000ffffff00000021f90401000000002c00000000010001000002024401003b")
@@ -779,6 +796,48 @@ def test_sheets_connection(session: Session = Depends(get_db)) -> dict[str, obje
 @app.get("/api/ai-settings", response_model=list[AIConfigRead])
 def ai_settings(session: Session = Depends(get_db)) -> list[AIConfig]:
     return list(session.scalars(select(AIConfig)))
+
+
+@app.get("/api/ai/status")
+def deepseek_status(session: Session = Depends(get_db)) -> dict[str, object]:
+    row = get_ai_settings(session)
+    session.commit()
+    settings = get_settings()
+    return {
+        "configured": bool(settings.deepseek_api_key),
+        "status": "Подключено" if settings.deepseek_api_key else "Не подключено",
+        "enrichment_enabled": row.enrichment_enabled,
+        "personalization_enabled": row.personalization_enabled,
+        "daily_request_limit": row.daily_request_limit,
+        "model": settings.deepseek_model,
+        "base_url": settings.deepseek_api_base,
+    }
+
+
+@app.patch("/api/ai/settings")
+def update_deepseek_settings(payload: AISettingsUpdate, session: Session = Depends(get_db)) -> dict[str, object]:
+    row = get_ai_settings(session)
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(row, key, value)
+    session.commit()
+    return deepseek_status(session)
+
+
+@app.post("/api/ai/test")
+def test_deepseek_connection(session: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
+    try:
+        result = DeepSeekClient(session, settings).generate(
+            company_id=None, operation="connection_test", content_hash="connection-test", missing_fields=[],
+            prompt_version="connection-v1", instructions="Верни только указанный JSON.", input_text='Верни {"subject":"ok","intro":"ok","personalized_paragraph":"ok"}',
+            response_model=PersonalizationFragments, max_output_tokens=40, use_cache=False,
+        )
+        session.commit()
+        return {"connected": True, "model": settings.deepseek_model, "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens, "reasoning_tokens": result.usage.reasoning_tokens}
+    except DeepSeekError as exc:
+        session.commit()
+        raise HTTPException(409 if exc.code in {"not_configured", "daily_limit"} else 502, str(exc)) from exc
 
 
 @app.post("/api/ai-settings", response_model=AIConfigRead, status_code=201)

@@ -125,6 +125,26 @@ def test_row_movement_is_found_by_leadflow_id() -> None:
         assert len(matches) == 1 and matches[0][7] == "+7 000 000-00-00"  # unchanged system value updates after row movement
 
 
+def test_ai_enrichment_updates_same_sheet_row_only_when_empty() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction, company, config = setup_company(session)
+        worksheet = FakeWorksheet()
+        service = GoogleSheetsSyncService(session, config)
+        service.sync_direction(direction, worksheet=worksheet)
+        assert worksheet.rows[1][4] == ""
+        assert apply_field(session, company, "branches_count", 4, discovery_method="ai_website_analysis",
+                           source_url="https://example.test/offices", confidence=0.8)
+        result = service.sync_direction(direction, worksheet=worksheet)
+        assert result["inserted"] == 0 and result["updated"] == 1
+        assert len([row for row in worksheet.rows if len(row) > 14 and row[14] == company.id]) == 1
+        assert worksheet.rows[1][4] == "4"
+        worksheet.rows[1][4] = "7"
+        service.sync_direction(direction, worksheet=worksheet)
+        assert company.branches_count == 7 and worksheet.rows[1][4] == "7"
+
+
 def test_duplicate_leadflow_id_is_rejected() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

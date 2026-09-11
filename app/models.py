@@ -441,6 +441,56 @@ class AIConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class AISettings(Base):
+    __tablename__ = "ai_settings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
+    enrichment_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    personalization_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    daily_request_limit: Mapped[int] = mapped_column(Integer, default=25)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class WebsiteAnalysis(Base):
+    __tablename__ = "website_analyses"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    website: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    raw_chars: Mapped[int] = mapped_column(Integer, default=0)
+    cleaned_chars: Mapped[int] = mapped_column(Integer, default=0)
+    relevant_chars: Mapped[int] = mapped_column(Integer, default=0)
+    page_blocks: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    facts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    deterministic_fields: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    ai_enrichment_result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class AIRequestLog(Base):
+    __tablename__ = "ai_request_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    operation: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    company_id: Mapped[str | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), index=True)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    missing_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
+    prompt_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    response_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    success: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    cache_hit: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class PhraseSearchRun(Base):
     __tablename__ = "phrase_search_runs"
 

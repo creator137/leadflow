@@ -430,4 +430,19 @@ class PhraseSearchRead(ORMModel):
 class PersonalizedSendCreate(BaseModel):
     mailbox_id: str
     template_id: str
-    ai_config_id: str
+    request_key: str
+    subject: str | None = None
+    html_body: str | None = None
+    text_body: str | None = None
+
+
+class PersonalizationPreviewCreate(BaseModel):
+    template_id: str
+    mailbox_id: str | None = None
+    regenerate: bool = False
+
+
+class AISettingsUpdate(BaseModel):
+    enrichment_enabled: bool | None = None
+    personalization_enabled: bool | None = None
+    daily_request_limit: int | None = Field(default=None, ge=1, le=10_000)

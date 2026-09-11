@@ -8,11 +8,12 @@ from sqlalchemy import case, distinct, func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
-    AIConfig, Company, CompanyDirection, CompanyFieldProvenance, Direction, DirectionRun,
+    AIRequestLog, Company, CompanyDirection, CompanyFieldProvenance, Direction, DirectionRun,
     EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun, InboundReply,
     MailAccount, SearchObservation, SheetRowMapping, Suppression,
 )
 from app.services.user_errors import human_error
+from app.config import get_settings
 
 
 def _n(value: Any) -> int:
@@ -226,9 +227,45 @@ def analytics(
         recent_actions.append({"at": _iso(item.created_at), "text": "Письмо отправлено" if item.sent_at else "Письмо поставлено в очередь"})
     recent_actions = sorted(recent_actions, key=lambda x: x["at"] or "", reverse=True)[:10]
 
+    ai_conditions = [AIRequestLog.created_at >= start, AIRequestLog.created_at <= end]
+    filtered_company_ids: set[str] | None = None
+    if direction or city or source:
+        filtered_stmt = select(Company.id)
+        if direction:
+            filtered_stmt = filtered_stmt.join(CompanyDirection).where(CompanyDirection.direction_id == direction)
+        if city:
+            filtered_stmt = filtered_stmt.where(Company.city == city)
+        if source:
+            filtered_stmt = filtered_stmt.where(Company.source == source)
+        filtered_company_ids = set(session.scalars(filtered_stmt))
+        ai_conditions.append(AIRequestLog.company_id.in_(filtered_company_ids or {""}))
+    ai_logs = list(session.scalars(select(AIRequestLog).where(*ai_conditions)))
+    actual_ai = [row for row in ai_logs if not row.cache_hit]
+    ai_provenance_conditions = [
+        CompanyFieldProvenance.discovery_method == "ai_website_analysis",
+        CompanyFieldProvenance.discovered_at >= start, CompanyFieldProvenance.discovered_at <= end,
+    ]
+    if filtered_company_ids is not None:
+        ai_provenance_conditions.append(CompanyFieldProvenance.company_id.in_(filtered_company_ids or {""}))
+    ai_provenance = list(session.scalars(select(CompanyFieldProvenance).where(*ai_provenance_conditions)))
+    ai_metrics = {
+        "requests": len(actual_ai), "cache_hits": sum(row.cache_hit for row in ai_logs),
+        "companies_enriched": len({row.company_id for row in ai_provenance}),
+        "decision_makers_found": sum(row.field == "decision_maker_name" for row in ai_provenance),
+        "emails_added": sum(row.field in {"company_email", "decision_maker_email"} for row in ai_provenance),
+        "phones_added": sum(row.field in {"company_phone", "decision_maker_phone"} for row in ai_provenance),
+        "personalized_emails": sum(row.operation == "email_personalization" and row.success for row in ai_logs),
+        "input_tokens": sum(row.input_tokens for row in actual_ai),
+        "cached_input_tokens": sum(row.cached_input_tokens for row in actual_ai),
+        "output_tokens": sum(row.output_tokens for row in actual_ai),
+        "reasoning_tokens": sum(row.reasoning_tokens for row in actual_ai),
+        "estimated_cost": round(sum(row.estimated_cost for row in actual_ai), 6),
+        "errors": sum(not row.success for row in actual_ai),
+    }
+
     active_directions = _n(session.scalar(select(func.count()).select_from(Direction).where(Direction.active.is_(True), Direction.archived_at.is_(None))))
     active_mailboxes = _n(session.scalar(select(func.count()).select_from(MailAccount).where(MailAccount.active.is_(True))))
-    ai_configured = bool(session.scalar(select(func.count()).select_from(AIConfig).where(AIConfig.active.is_(True))))
+    ai_configured = bool(get_settings().deepseek_api_key)
     overall_ok = all(item["status"] == "Работает" for item in systems if item["name"] not in {"Яндекс Карты", "2ГИС"} or item["last_success"])
 
     return {
@@ -273,5 +310,5 @@ def analytics(
             "coverage": _rate(sum(bool(x.website) for x in companies), len(companies)), "by_method": dict(website_methods)},
         "email": email_counts, "mailboxes": mailbox_rows, "templates": template_rows,
         "replies": {"total": len(reply_rows), "rows": reply_rows}, "sheets": sheets,
-        "system": systems, "daily": daily, "recent_actions": recent_actions,
+        "system": systems, "daily": daily, "recent_actions": recent_actions, "ai": ai_metrics,
     }

@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     google_sheets_spreadsheet_id: str = "1-xcz_byoVsmrwLFK1qH4ykQSNff3LOkxoHiu0ceHpqg"
     google_service_account_json: str | None = None
     google_sheets_email_status_header: str | None = None
+    deepseek_api_key: str | None = None
+    deepseek_api_base: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-flash"
+    deepseek_max_input_chars: int = 2000
+    deepseek_input_cost_per_million: float = 0.30
+    deepseek_cached_input_cost_per_million: float = 0.006
+    deepseek_output_cost_per_million: float = 1.20
 
 
 @lru_cache

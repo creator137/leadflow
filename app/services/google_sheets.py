@@ -44,7 +44,7 @@ COLUMNS: tuple[tuple[str, str], ...] = (
 HEADERS = [header for header, _ in COLUMNS]
 MANUAL_FIELDS = {
     "communication_started_at", "region", "city", "branches_count", "address", "company_email",
-    "company_phone", "decision_maker_name", "decision_maker_email", "decision_maker_phone", "website", "action", "result",
+    "company_phone", "decision_maker_name", "decision_maker_email", "decision_maker_phone", "website", "inn", "action", "result",
 }
 T = TypeVar("T")
 
@@ -109,6 +109,7 @@ def discover_schema(rows: list[list[str]]) -> SheetSchema:
         elif value == "адрес": fields["address"] = index
         elif value == "лпр": fields["decision_maker_name"] = index
         elif value in {"сайт", "веб-сайт", "website"}: fields["website"] = index
+        elif value == "инн": fields["inn"] = index
         elif value == "почта": email_columns.append(index)
         elif value == "телефон": phone_columns.append(index)
         elif value == "действие": actions.append(index)
@@ -190,7 +191,7 @@ class GoogleSheetsSyncService:
             rows = [HEADERS]
         schema = discover_schema(rows)
         header = rows[schema.header_row - 1]
-        for field_name, field_header in (("branches_count", "Кол-во филиалов"), ("website", "Сайт")):
+        for field_name, field_header in (("branches_count", "Кол-во филиалов"), ("website", "Сайт"), ("inn", "ИНН")):
             if field_name in schema.fields:
                 continue
             column = max(len(header), schema.leadflow_id_column) + 1

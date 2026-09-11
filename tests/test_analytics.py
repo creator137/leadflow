@@ -5,8 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.models import (
-    Company, CompanyDirection, Direction, DirectionRun, EmailDelivery, EmailTemplate,
-    MailAccount, SearchObservation,
+    AIRequestLog, Company, CompanyDirection, CompanyFieldProvenance, Direction, DirectionRun, EmailDelivery,
+    EmailTemplate, MailAccount, SearchObservation,
 )
 from app.services.analytics import analytics
 
@@ -29,6 +29,11 @@ def seed(session: Session):
         SearchObservation(run_id=run.id, direction_id=direction.id, company_id=company.id, source="two_gis", query="кафе", city="Москва", is_new=False, has_phone=True, has_email=False, has_website=True, has_branches_count=True, observed_at=now),
     ])
     session.add(EmailDelivery(company_id=company.id, direction_id=direction.id, mailbox_id=mailbox.id, template_id=template.id, recipient_email="info@example.ru", subject="Здравствуйте", html_body="<p>Текст</p>", text_body="Текст", status="replied", tracking_token="track", unsubscribe_token="unsub", sent_at=now, opened_at=now, replied_at=now, created_at=now))
+    session.add(AIRequestLog(operation="website_enrichment", company_id=company.id, model="deepseek-flash",
+        request_key="ai-request", content_hash="hash", missing_fields=["decision_maker_name"], prompt_version="v1",
+        input_tokens=100, output_tokens=10, success=True, created_at=now))
+    session.add(CompanyFieldProvenance(company_id=company.id, field="decision_maker_name", value="Иван Иванов",
+        source_url="https://example.ru/team", confidence=0.8, discovery_method="ai_website_analysis", discovered_at=now))
     session.commit()
     return direction
 
@@ -47,6 +52,8 @@ def test_analytics_aggregations_match_reference_sql_and_filters() -> None:
         assert {row["name"] for row in result["sources"]["rows"]} == {"yandex_maps", "two_gis"}
         assert {row["name"] for row in result["queries"]} == {"ресторан", "кафе"}
         assert result["cities"][0]["name"] == "Москва"
+        assert result["ai"]["requests"] == 1 and result["ai"]["companies_enriched"] == 1
+        assert result["ai"]["input_tokens"] == 100 and result["ai"]["output_tokens"] == 10
         filtered = analytics(session, direction=direction.id, city="Москва", source="yandex_maps")
         assert filtered["overview"]["new"] == 1 and filtered["overview"]["duplicates"] == 0
         assert filtered["data_quality"]["total"] == 1
