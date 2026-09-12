@@ -31,14 +31,14 @@ from app.models import (
 from app.services.provenance import apply_field
 from app.services.secrets import decrypt_secret, encrypt_secret
 
-# Legacy canonical order remains public for compatibility and tests. Real worksheets
-# are mapped positionally after their actual header row is inspected.
+# New worksheets start with the website address. Existing worksheets are mapped
+# positionally and migrated to the same order during their next synchronization.
 COLUMNS: tuple[tuple[str, str], ...] = (
-    ("Начало общения / Дата", "communication_started_at"), ("Наименование клиента", "company_name"),
+    ("Сайт", "website"), ("Начало общения / Дата", "communication_started_at"), ("Наименование клиента", "company_name"),
     ("Область", "region"), ("Город", "city"), ("Кол-во филиалов", "branches_count"),
     ("Адрес", "address"), ("Почта", "company_email"), ("Телефон", "company_phone"),
     ("ЛПР", "decision_maker_name"), ("Почта", "decision_maker_email"),
-    ("Телефон", "decision_maker_phone"), ("Сайт", "website"),
+    ("Телефон", "decision_maker_phone"),
     ("Действие", "action"), ("Результат?", "result"),
     ("LeadFlow ID", "id"),
 )
@@ -144,6 +144,28 @@ def company_row(company: Company) -> list[str]:
     return [_text(getattr(company, field_name)) for _, field_name in COLUMNS]
 
 
+def _move_website_column_first(worksheet, rows: list[list[str]]) -> bool:
+    """Move an existing website column to A without rewriting cell contents."""
+    try:
+        schema = discover_schema(rows)
+        website_column = schema.fields.get("website")
+        if not website_column or website_column == 1:
+            return False
+        _retry(lambda: worksheet.spreadsheet.batch_update({"requests": [{"moveDimension": {
+            "source": {
+                "sheetId": worksheet.id,
+                "dimension": "COLUMNS",
+                "startIndex": website_column - 1,
+                "endIndex": website_column,
+            },
+            "destinationIndex": 0,
+        }}]}))
+        return True
+    except (AttributeError, gspread.exceptions.APIError, requests.RequestException, TransportError):
+        logger.warning("Could not move the website column to the beginning", exc_info=True)
+        return False
+
+
 def _parse_manual(field_name: str, value: str) -> Any:
     if field_name == "communication_started_at":
         try: return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -191,6 +213,8 @@ class GoogleSheetsSyncService:
         if not rows or not any(any(cell.strip() for cell in row) for row in rows):
             _retry(lambda: worksheet.update(range_name=f"A1:{_column_letter(len(COLUMNS))}1", values=[HEADERS]))
             rows = [HEADERS]
+        elif _move_website_column_first(worksheet, rows):
+            rows = _retry(worksheet.get_all_values)
         schema = discover_schema(rows)
         header = rows[schema.header_row - 1]
         for field_name, field_header in (("branches_count", "Кол-во филиалов"), ("website", "Сайт"), ("inn", "ИНН")):
