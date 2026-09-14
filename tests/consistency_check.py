@@ -55,8 +55,9 @@ def run() -> None:
                 body="" if route.request.resource_type == "stylesheet" else bootstrap_stub,
             ),
         )
-        page.goto("http://127.0.0.1:8000/#analytics", wait_until="domcontentloaded", timeout=60_000)
-        page.wait_for_selector("#analyticsBody .metric-card", timeout=60_000)
+        page.goto("http://127.0.0.1:8000/#analytics", wait_until="commit", timeout=30_000)
+        page.wait_for_function("typeof showSection === 'function'", timeout=120_000)
+        page.wait_for_selector("#analyticsBody .metric-card", timeout=120_000)
         integer_labels = {
             "Новых уникальных", "Дубликатов", "Компаний с сайтом", "Компаний с email",
             "Компаний с телефоном", "Отправлено писем", "Ответов", "Не доставлено", "Отписок",
