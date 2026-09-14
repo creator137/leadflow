@@ -210,6 +210,16 @@ def standardize_business_columns(worksheet: Any, rows: list[list[str]]) -> list[
             header.insert(destination - 1, header.pop(source - 1))
         elif source < destination:
             raise ValueError(f"Cannot safely align sheet column {field_name}: {source} -> {destination}")
+    header_updates = []
+    for column, (title, _) in enumerate(BUSINESS_COLUMNS, start=1):
+        if header[column - 1] != title:
+            header_updates.append({
+                "range": f"{_column_letter(column)}{schema.header_row}",
+                "values": [[title]],
+            })
+            header[column - 1] = title
+    if header_updates:
+        _retry(lambda: worksheet.batch_update(header_updates))
     return _retry(worksheet.get_all_values)
 
 
