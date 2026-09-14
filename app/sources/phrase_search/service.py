@@ -57,7 +57,7 @@ class FreeSearchProvider:
                         found.append(url)
             except httpx.HTTPError:
                 pass
-            if len(found) >= limit:
+            if found:
                 return found[:limit]
             try:
                 response = client.get("https://ru.wikipedia.org/w/api.php", params={
@@ -73,7 +73,7 @@ class FreeSearchProvider:
                             found.append(url)
             except (httpx.HTTPError, ValueError):
                 pass
-            if len(found) >= limit:
+            if found:
                 return found[:limit]
             try:
                 response = client.get(f"https://www.bing.com/search?format=rss&q={query}")
