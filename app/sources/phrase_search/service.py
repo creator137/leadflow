@@ -62,7 +62,7 @@ class FreeSearchProvider:
             try:
                 response = client.get(f"https://www.bing.com/search?format=rss&q={query}")
                 response.raise_for_status()
-                for link in BeautifulSoup(response.text, "xml").select("item > link"):
+                for link in BeautifulSoup(response.text, "html.parser").select("item > link"):
                     url = self._clean_url(link.get_text(strip=True))
                     if url and url not in found:
                         found.append(url)
