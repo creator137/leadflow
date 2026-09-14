@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     google_sheets_spreadsheet_id: str = "1-xcz_byoVsmrwLFK1qH4ykQSNff3LOkxoHiu0ceHpqg"
     google_service_account_json: str | None = None
     google_sheets_email_status_header: str | None = None
+    google_sheets_action_token: str | None = None
     deepseek_api_key: str | None = None
     deepseek_api_base: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-flash"

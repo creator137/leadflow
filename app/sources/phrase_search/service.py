@@ -1,185 +1,196 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
-from typing import Protocol
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qs, quote_plus, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import AIConfig, PhraseSearchRun
+from app.models import CompanyDirection, CompanySourceRecord, Direction, PhraseSearchResult, PhraseSearchRun
+from app.services.company_enrichment import crawl_website
+from app.services.deepseek import DeepSeekClient
 from app.services.dedup import upsert_lead
-from app.services.secrets import decrypt_secret
+from app.services.google_sheets import active_sheets_config, sync_companies
 from app.sources.base import CompanyLead, SourceError
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-PHONE_RE = re.compile(r"(?:\+7|8)[\s()\-\d]{10,18}")
+PHONE_RE = re.compile(r"(?:\+7|8)[\s(.-]*\d{3}[\s).-]*\d{3}[\s.-]*\d{2}[\s.-]*\d{2}")
+EXCLUDED_HOSTS = {"bing.com", "www.bing.com", "duckduckgo.com", "www.duckduckgo.com"}
 
 
-class SearchProvider(Protocol):
-    def search(self, phrase: str, limit: int) -> list[str]: ...
+class FreeSearchProvider:
+    """Discover only URLs actually returned by free public search pages."""
 
+    def __init__(self) -> None:
+        self.headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36", "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.7"}
 
-class SerperProvider:
-    def __init__(self, api_key: str) -> None:
-        self.api_key = api_key
+    @staticmethod
+    def _clean_url(value: str) -> str | None:
+        if value.startswith("//duckduckgo.com/l/"):
+            value = "https:" + value
+        parsed = urlsplit(value)
+        if parsed.hostname in {"duckduckgo.com", "www.duckduckgo.com"} and parsed.path.startswith("/l/"):
+            value = parse_qs(parsed.query).get("uddg", [""])[0]
+            parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.hostname.casefold() in EXCLUDED_HOSTS:
+            return None
+        return value.split("#", 1)[0]
 
     def search(self, phrase: str, limit: int) -> list[str]:
-        response = httpx.post(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
-            json={"q": f'"{phrase}"', "num": min(limit, 100)},
-            timeout=30,
-        )
-        response.raise_for_status()
-        return [item["link"] for item in response.json().get("organic", []) if item.get("link")]
+        query, found = quote_plus(phrase), []
+        with httpx.Client(headers=self.headers, follow_redirects=True, timeout=20) as client:
+            try:
+                response = client.get(f"https://www.bing.com/search?format=rss&q={query}")
+                response.raise_for_status()
+                for link in BeautifulSoup(response.text, "xml").select("item > link"):
+                    url = self._clean_url(link.get_text(strip=True))
+                    if url and url not in found:
+                        found.append(url)
+            except httpx.HTTPError:
+                pass
+            if len(found) < limit:
+                try:
+                    response = client.get(f"https://html.duckduckgo.com/html/?q={query}")
+                    response.raise_for_status()
+                    for link in BeautifulSoup(response.text, "html.parser").select("a.result__a[href]"):
+                        url = self._clean_url(str(link.get("href") or ""))
+                        if url and url not in found:
+                            found.append(url)
+                except httpx.HTTPError:
+                    pass
+        if not found:
+            raise SourceError("Бесплатный поиск временно не вернул публичные страницы.")
+        return found[:limit]
 
 
-def _provider(settings: Settings) -> SearchProvider:
-    if settings.search_provider == "serper" and settings.serper_api_key:
-        return SerperProvider(settings.serper_api_key)
-    raise SourceError("No configured phrase search provider")
-
-
-def _organization_metadata(soup: BeautifulSoup) -> dict[str, str]:
-    candidates: list[dict] = []
-
-    def visit(value: object) -> None:
-        if isinstance(value, dict):
-            item_type = value.get("@type", "")
-            types = item_type if isinstance(item_type, list) else [item_type]
-            if value.get("name") and any(
-                isinstance(kind, str) and ("organization" in kind.casefold() or "business" in kind.casefold())
-                for kind in types
-            ):
-                candidates.append(value)
-            for child in value.values():
-                visit(child)
-        elif isinstance(value, list):
-            for child in value:
-                visit(child)
-
+def _organization_metadata(html: str | BeautifulSoup) -> dict[str, str]:
+    soup, pending = (html if isinstance(html, BeautifulSoup) else BeautifulSoup(html, "html.parser")), []
     for script in soup.select('script[type="application/ld+json"]'):
         try:
-            visit(json.loads(script.string or script.get_text()))
+            pending.append(json.loads(script.string or script.get_text()))
         except (json.JSONDecodeError, TypeError):
             continue
-    if not candidates:
-        return {}
-    item = candidates[0]
-    address = item.get("address")
-    result = {"name": str(item["name"]).strip()}
-    if isinstance(address, dict):
-        parts = [address.get(key) for key in ("postalCode", "addressRegion", "addressLocality", "streetAddress")]
-        result["address"] = ", ".join(str(part).strip() for part in parts if part)
-        if address.get("addressLocality"):
-            result["city"] = str(address["addressLocality"]).strip()
-    elif isinstance(address, str):
-        result["address"] = address.strip()
-    for source, target in (("telephone", "phone"), ("email", "email"), ("url", "website")):
-        if item.get(source):
-            result[target] = str(item[source]).strip()
-    return result
+    while pending:
+        value = pending.pop(0)
+        if isinstance(value, list):
+            pending.extend(value)
+            continue
+        if not isinstance(value, dict):
+            continue
+        pending.extend(child for child in value.values() if isinstance(child, (dict, list)))
+        kinds = value.get("@type", [])
+        kinds = kinds if isinstance(kinds, list) else [kinds]
+        if not value.get("name") or not any(str(kind) in {"Organization", "LocalBusiness", "Corporation"} for kind in kinds):
+            continue
+        result = {"name": str(value["name"]).strip()}
+        address = value.get("address")
+        if isinstance(address, dict):
+            result["address"] = ", ".join(str(address.get(k, "")).strip() for k in ("postalCode", "addressRegion", "addressLocality", "streetAddress") if address.get(k))
+            result["city"] = str(address.get("addressLocality") or "").strip()
+        for source, target in (("telephone", "phone"), ("email", "email"), ("url", "website")):
+            if value.get(source):
+                result[target] = str(value[source]).strip()
+        return result
+    return {}
 
 
-def _semantic_match(session: Session, phrase: str, text: str) -> tuple[bool, float]:
-    config = session.query(AIConfig).filter(AIConfig.active.is_(True)).order_by(AIConfig.updated_at.desc()).first()
-    if not config:
-        return False, 0.0
-    try:
-        response = httpx.post(
-            config.api_base.rstrip("/") + "/chat/completions",
-            headers={"Authorization": f"Bearer {decrypt_secret(config.api_key_encrypted)}"},
-            json={
-                "model": config.model,
-                "temperature": 0,
-                "response_format": {"type": "json_object"},
-                "messages": [{
-                    "role": "user",
-                    "content": (
-                        "Determine whether the page describes the same concrete event, service, or subject as the "
-                        "query. Return JSON {\"match\": boolean, \"score\": number from 0 to 1}.\n"
-                        f"Query: {phrase}\nPage: {text[:8000]}"
-                    ),
-                }],
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        answer = json.loads(response.json()["choices"][0]["message"]["content"])
-        score = float(answer.get("score", 0))
-        return bool(answer.get("match")) and score >= 0.75, score
-    except Exception:
-        return False, 0.0
+class PhraseDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    relevant: bool
+    company_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    evidence_text: str | None = Field(default=None, max_length=500)
+
+
+DECISION_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["relevant", "company_name", "email", "phone", "evidence_text"], "properties": {"relevant": {"type": "boolean"}, "company_name": {"type": ["string", "null"]}, "email": {"type": ["string", "null"]}, "phone": {"type": ["string", "null"]}, "evidence_text": {"type": ["string", "null"], "maxLength": 500}}}
+
+
+def _page_evidence(text: str, phrase: str) -> str | None:
+    tokens = [token for token in re.findall(r"[\w-]+", phrase.casefold()) if len(token) > 2]
+    for part in re.split(r"(?<=[.!?])\s+", text):
+        if sum(token in part.casefold() for token in tokens) >= max(1, min(2, len(tokens))):
+            return part[:500]
+    return None
+
+
+def _ai_decision(session: Session, settings: Settings, run: PhraseSearchRun, url: str, text: str) -> PhraseDecision:
+    prompt = json.dumps({"phrase": run.phrase, "city": run.city, "source_url": url, "page_text": text[:5000]}, ensure_ascii=False, separators=(",", ":"))
+    content_hash = hashlib.sha256((url + "\n" + text).encode()).hexdigest()
+    result = DeepSeekClient(session, settings).generate(company_id=None, operation="phrase_search", content_hash=content_hash, missing_fields=["relevance", "company_name", "email", "phone"], prompt_version="phrase-search-v1", instructions="Определи, описывает ли публичная страница реальную организацию, соответствующую фразе и городу. Извлекай только явно указанные значения. Не придумывай URL, название или контакты. evidence_text должен быть точной короткой цитатой из page_text; без подтверждения relevant=false.", input_text=prompt, response_model=PhraseDecision, schema=DECISION_SCHEMA, max_output_tokens=220, use_cache=True)
+    decision = result.data
+    if not decision.evidence_text or decision.evidence_text.casefold() not in text.casefold():
+        decision.relevant = False
+    return decision
 
 
 def execute_phrase_search(session: Session, run: PhraseSearchRun, settings: Settings, limit: int = 20) -> PhraseSearchRun:
     run.status = "running"
     session.commit()
-    found = 0
     try:
-        urls = _provider(settings).search(run.phrase, limit)
-        headers = {"User-Agent": "LeadFlow/0.1 public-contact-indexer"}
-        with httpx.Client(headers=headers, follow_redirects=True, timeout=15) as client:
-            for url in urls:
-                try:
-                    response = client.get(url)
-                    response.raise_for_status()
-                    if "text/html" not in response.headers.get("content-type", ""):
-                        continue
-                except Exception:
+        query = " ".join(part for part in (run.phrase, run.city, run.region) if part)
+        urls = FreeSearchProvider().search(query, limit)
+        run.urls_discovered = len(urls)
+        session.commit()
+        direction = session.get(Direction, run.direction_id) if run.direction_id else None
+        for url in urls:
+            try:
+                snapshot = crawl_website(url, max_pages=2)
+                if not snapshot.pages:
+                    raise ValueError("Публичную страницу не удалось прочитать.")
+                page, method = snapshot.pages[0], "deterministic"
+                metadata = _organization_metadata(page.html)
+                evidence_text = _page_evidence(page.text, run.phrase)
+                decision = None
+                if run.use_ai and (not metadata.get("name") or not evidence_text):
+                    decision = _ai_decision(session, settings, run, page.url, page.text)
+                    method, evidence_text = "ai", decision.evidence_text
+                if not evidence_text or (decision and not decision.relevant):
+                    session.add(PhraseSearchResult(run_id=run.id, phrase=run.phrase, source_url=page.url, extraction_method=method, status="irrelevant", evidence=[]))
+                    session.commit()
                     continue
-                soup = BeautifulSoup(response.text, "html.parser")
-                metadata = _organization_metadata(soup)
-                for tag in soup(["script", "style", "noscript"]):
-                    tag.decompose()
-                text = " ".join(soup.get_text(" ").split())
-                exact = run.phrase.casefold() in text.casefold()
-                phrase_tokens = set(re.findall(r"\w+", run.phrase.casefold()))
-                page_tokens = set(re.findall(r"\w+", text.casefold()))
-                token_coverage = len(phrase_tokens & page_tokens) / max(1, len(phrase_tokens))
-                score = max(
-                    SequenceMatcher(None, run.phrase.casefold(), text[:5000].casefold()).quick_ratio(),
-                    token_coverage,
-                )
-                semantic = False
-                if not exact and score < 0.75:
-                    semantic, semantic_score = _semantic_match(session, run.phrase, text)
-                    score = max(score, semantic_score)
-                    if not semantic:
-                        continue
-                site_name = soup.select_one('meta[property="og:site_name"]')
-                title = metadata.get("name") or (site_name.get("content", "").strip() if site_name else "")
-                title = title or (soup.title.string.strip() if soup.title and soup.title.string else urlsplit(url).hostname or "Unknown")
-                emails = [e.casefold() for e in EMAIL_RE.findall(text)]
-                phones = PHONE_RE.findall(text)
-                lead = CompanyLead(
-                    source="phrase_search",
-                    source_external_id=url,
-                    source_url=url,
-                    company_name=title[:500],
-                    website=metadata.get("website") or f"{urlsplit(url).scheme}://{urlsplit(url).netloc}",
-                    phone=metadata.get("phone") or (phones[0] if phones else None),
-                    email=metadata.get("email") or (emails[0] if emails else None),
-                    city=metadata.get("city"),
-                    address=metadata.get("address"),
-                    raw_data={"match_url": url, "exact_match": exact, "semantic_match": semantic, "similarity": score},
-                )
-                if upsert_lead(session, lead).inserted:
-                    found += 1
+                host = urlsplit(page.url).hostname or ""
+                company_name = metadata.get("name") or (decision.company_name if decision else None) or host.removeprefix("www.")
+                emails, phones = EMAIL_RE.findall(page.text), PHONE_RE.findall(page.text)
+                email = metadata.get("email") or (decision.email if decision else None) or (emails[0] if emails else None)
+                phone = metadata.get("phone") or (decision.phone if decision else None) or (phones[0] if phones else None)
+                website = metadata.get("website") or f"{urlsplit(page.url).scheme}://{host}"
+                lead = CompanyLead(source="phrase_search", source_external_id=page.url, source_url=page.url, company_name=company_name[:500], category=direction.name if direction else None, city=metadata.get("city") or run.city, address=metadata.get("address"), website=website, phone=phone, email=email, raw_data={"phrase": run.phrase, "evidence": evidence_text, "source_url": page.url})
+                upsert = upsert_lead(session, lead)
+                linked = direction and session.scalar(select(CompanyDirection.id).where(
+                    CompanyDirection.company_id == upsert.company.id, CompanyDirection.direction_id == direction.id))
+                if direction and not linked:
+                    session.add(CompanyDirection(company_id=upsert.company.id, direction_id=direction.id))
+                exists = session.scalar(select(CompanySourceRecord.id).where(CompanySourceRecord.company_id == upsert.company.id, CompanySourceRecord.source == "phrase_search", CompanySourceRecord.source_url == page.url))
+                if not exists:
+                    session.add(CompanySourceRecord(company_id=upsert.company.id, source="phrase_search", source_external_id=page.url, source_url=page.url, raw_data=lead.raw_data))
+                status = "added" if upsert.inserted else "duplicate"
+                run.new_count += int(upsert.inserted)
+                run.duplicate_count += int(not upsert.inserted)
+                run.result_count += 1
+                session.add(PhraseSearchResult(run_id=run.id, company_id=upsert.company.id, phrase=run.phrase, source_url=page.url, company_name=upsert.company.company_name, website=upsert.company.website, email=upsert.company.company_email, phone=upsert.company.company_phone, extraction_method=method, status=status, evidence=[{"field": "relevance", "value": run.phrase, "source_url": page.url, "evidence_text": evidence_text}]))
                 session.commit()
+            except Exception:
+                session.rollback()
+                session.add(PhraseSearchResult(run_id=run.id, phrase=run.phrase, source_url=url, status="error", error="Страницу не удалось обработать."))
+                session.commit()
+        config = active_sheets_config(session, settings)
+        if config and run.result_count:
+            sync_companies(session, config)
+        run = session.get(PhraseSearchRun, run.id)
         run.status = "completed"
-        run.result_count = found
     except Exception as exc:
         session.rollback()
         run = session.get(PhraseSearchRun, run.id)
         run.status = "failed"
-        run.error = str(exc)
+        run.error = str(exc) if re.search(r"[А-Яа-яЁё]", str(exc)) else "Бесплатный поиск временно недоступен."
     run.finished_at = datetime.now(timezone.utc)
     session.commit()
     return run

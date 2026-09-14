@@ -18,7 +18,7 @@ from app.db import SessionLocal, get_db
 from app.models import (
     AIConfig, Campaign, Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord,
     Direction, DirectionRun, EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun,
-    MailAccount, ParserRun, PhraseSearchRun, SheetPersonalizationDraft, SheetRowMapping, SourceJob, Suppression, TrackedLink,
+    MailAccount, ParserRun, PhraseSearchResult, PhraseSearchRun, SheetPersonalizationDraft, SheetRowMapping, SourceJob, Suppression, TrackedLink,
 )
 from app.schemas import (
     AIConfigCreate, AIConfigRead, CampaignCreate, CampaignRead, CampaignUpdate, CompanyRead, CompanyUpdate,
@@ -26,7 +26,7 @@ from app.schemas import (
     EmailTemplateRead, EmailTemplateUpdate, GoogleSheetsConfigCreate, GoogleSheetsConfigRead, MailAccountCreate,
     MailAccountRead, MailAccountUpdate, ManualSendCreate, ParserRunRead, SuppressionCreate, TemplatePreview, TemplateTestSend,
     AISettingsUpdate, PersonalizationPreviewCreate, PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead,
-    SourceJobCreate, SourceJobRead, SourceJobUpdate,
+    SheetActionRequest, SourceJobCreate, SourceJobRead, SourceJobUpdate,
 )
 from app.services.collection import execute_job
 from app.services.analytics import analytics as build_analytics
@@ -40,6 +40,7 @@ from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, e
 from app.services.deepseek import DeepSeekClient, DeepSeekError, ai_settings as get_ai_settings
 from app.services.personalized import PersonalizationFragments, prepare_personalization, send_personalized
 from app.services.sheet_personalization import send_sheet_draft, serialize_draft
+from app.services.sheet_actions import execute_sheet_action
 from app.services.secrets import decrypt_secret, encrypt_secret
 from app.services.provenance import apply_field
 from app.services.user_errors import human_error
@@ -60,6 +61,13 @@ def security_startup_check() -> None:
 @app.middleware("http")
 async def optional_basic_auth(request: Request, call_next):
     settings = get_settings()
+    sheet_action = request.url.path.startswith("/api/google-sheets/actions/")
+    if sheet_action:
+        supplied = request.headers.get("X-LeadFlow-Sheet-Token", "")
+        configured = settings.google_sheets_action_token or ""
+        if not configured or not supplied or not secrets.compare_digest(supplied, configured):
+            return Response("Unauthorized", status_code=401)
+        return await call_next(request)
     protected = request.url.path == "/" or request.url.path.startswith(("/api", "/docs", "/redoc", "/openapi"))
     if protected and settings.admin_username and settings.admin_password:
         authorization = request.headers.get("Authorization", "")
@@ -919,16 +927,43 @@ def _phrase_background(run_id: str, limit: int) -> None:
             execute_phrase_search(session, run, get_settings(), limit)
 
 
-@app.post("/api/phrase-search", response_model=PhraseSearchRead, status_code=202)
-def phrase_search(payload: PhraseSearchCreate, tasks: BackgroundTasks, session: Session = Depends(get_db)) -> PhraseSearchRun:
-    run = PhraseSearchRun(phrase=payload.phrase)
-    session.add(run)
+@app.post("/api/phrase-search", response_model=list[PhraseSearchRead], status_code=202)
+def phrase_search(payload: PhraseSearchCreate, tasks: BackgroundTasks, session: Session = Depends(get_db)) -> list[PhraseSearchRun]:
+    if not session.get(Direction, payload.direction_id):
+        raise HTTPException(404, "Направление не найдено.")
+    runs = [PhraseSearchRun(direction_id=payload.direction_id, phrase=phrase, city=payload.city,
+                            region=payload.region, use_ai=payload.use_ai) for phrase in payload.phrases]
+    session.add_all(runs)
     session.commit()
-    session.refresh(run)
-    tasks.add_task(_phrase_background, run.id, payload.limit)
-    return run
+    for run in runs:
+        session.refresh(run)
+        tasks.add_task(_phrase_background, run.id, payload.limit)
+    return runs
 
 
 @app.get("/api/phrase-search", response_model=list[PhraseSearchRead])
 def phrase_search_runs(session: Session = Depends(get_db)) -> list[PhraseSearchRun]:
-    return list(session.scalars(select(PhraseSearchRun).order_by(PhraseSearchRun.created_at.desc())))
+    return list(session.scalars(select(PhraseSearchRun).order_by(PhraseSearchRun.created_at.desc()).limit(100)))
+
+
+@app.get("/api/phrase-search/results")
+def phrase_search_results(limit: int = Query(200, ge=1, le=500), session: Session = Depends(get_db)) -> list[dict[str, object]]:
+    rows = session.execute(select(PhraseSearchResult, PhraseSearchRun, Direction.name).join(
+        PhraseSearchRun, PhraseSearchRun.id == PhraseSearchResult.run_id
+    ).outerjoin(Direction, Direction.id == PhraseSearchRun.direction_id).order_by(
+        PhraseSearchResult.created_at.desc()).limit(limit)).all()
+    return [{"id": item.id, "created_at": item.created_at, "direction": direction or "Без направления",
+             "phrase": item.phrase, "source_url": item.source_url, "company_id": item.company_id,
+             "company_name": item.company_name, "website": item.website, "email": item.email,
+             "phone": item.phone, "extraction_method": item.extraction_method, "status": item.status,
+             "evidence": item.evidence, "error": item.error} for item, _run, direction in rows]
+
+
+@app.post("/api/google-sheets/actions/{action}")
+def google_sheet_action(action: str, payload: SheetActionRequest, session: Session = Depends(get_db)) -> dict[str, object]:
+    if action not in {"prepare", "send"}:
+        raise HTTPException(404, "Действие не найдено.")
+    try:
+        return execute_sheet_action(session, payload.company_id, action, get_settings())
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc

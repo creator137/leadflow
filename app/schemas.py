@@ -413,18 +413,41 @@ class AIConfigRead(ORMModel):
 
 
 class PhraseSearchCreate(BaseModel):
-    phrase: str = Field(min_length=3)
+    direction_id: str
+    city: str = Field(min_length=2, max_length=255)
+    region: str | None = Field(default=None, max_length=255)
+    phrases: list[str] = Field(min_length=1, max_length=20)
     limit: int = Field(default=20, ge=1, le=100)
+    use_ai: bool = True
+
+    @field_validator("phrases")
+    @classmethod
+    def clean_phrases(cls, values: list[str]) -> list[str]:
+        result = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+        if not result or any(len(value) < 3 or len(value) > 255 for value in result):
+            raise ValueError("Каждая фраза должна содержать от 3 до 255 символов.")
+        return result
 
 
 class PhraseSearchRead(ORMModel):
     id: str
+    direction_id: str | None
     phrase: str
+    city: str | None
+    region: str | None
+    use_ai: bool
     status: str
+    urls_discovered: int
     result_count: int
+    new_count: int
+    duplicate_count: int
     error: str | None
     created_at: datetime
     finished_at: datetime | None
+
+
+class SheetActionRequest(BaseModel):
+    company_id: str = Field(min_length=1, max_length=36)
 
 
 class PersonalizedSendCreate(BaseModel):

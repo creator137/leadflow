@@ -32,13 +32,13 @@ from app.services.provenance import apply_field
 from app.services.secrets import decrypt_secret, encrypt_secret
 from app.services.user_errors import STATUS_RU
 
-# New worksheets start with the website address. The first twelve columns are
+# New worksheets place the website immediately after the company phone. The first twelve columns are
 # the shared business area; manual workflow columns may safely follow it.
 COLUMNS: tuple[tuple[str, str], ...] = (
-    ("Сайт", "website"), ("Начало общения / Дата", "communication_started_at"), ("Наименование клиента", "company_name"),
+    ("Начало общения / Дата", "communication_started_at"), ("Наименование клиента", "company_name"),
     ("Область", "region"), ("Город", "city"), ("Кол-во филиалов", "branches_count"),
     ("Адрес", "address"), ("Почта", "company_email"), ("Телефон", "company_phone"),
-    ("ЛПР", "decision_maker_name"), ("Почта", "decision_maker_email"),
+    ("Сайт", "website"), ("ЛПР", "decision_maker_name"), ("Почта", "decision_maker_email"),
     ("Телефон", "decision_maker_phone"),
     ("Действие", "action"), ("Результат?", "result"),
     ("LeadFlow ID", "id"),
@@ -178,7 +178,7 @@ def _move_column_left(worksheet: Any, source: int, destination: int) -> None:
 
 
 def standardize_business_columns(worksheet: Any, rows: list[list[str]]) -> list[list[str]]:
-    """Keep one Website column at A and align the shared sheet layout A:AB.
+    """Keep one Website column after company phone and align the shared sheet layout A:AB.
 
     Moving/inserting whole columns through the Sheets API preserves formulas,
     formatting and manual workflow data that live to the right of this area.

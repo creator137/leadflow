@@ -518,9 +518,37 @@ class PhraseSearchRun(Base):
     __tablename__ = "phrase_search_runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    direction_id: Mapped[str | None] = mapped_column(ForeignKey("directions.id", ondelete="SET NULL"), index=True)
     phrase: Mapped[str] = mapped_column(Text, nullable=False)
+    city: Mapped[str | None] = mapped_column(String(255), index=True)
+    region: Mapped[str | None] = mapped_column(String(255))
+    use_ai: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    urls_discovered: Mapped[int] = mapped_column(Integer, default=0)
     result_count: Mapped[int] = mapped_column(Integer, default=0)
+    new_count: Mapped[int] = mapped_column(Integer, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PhraseSearchResult(Base):
+    __tablename__ = "phrase_search_results"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("phrase_search_runs.id", ondelete="CASCADE"), index=True)
+    company_id: Mapped[str | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), index=True)
+    phrase: Mapped[str] = mapped_column(Text, nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    company_name: Mapped[str | None] = mapped_column(Text)
+    website: Mapped[str | None] = mapped_column(Text)
+    email: Mapped[str | None] = mapped_column(String(320))
+    phone: Mapped[str | None] = mapped_column(String(255))
+    extraction_method: Mapped[str] = mapped_column(String(32), default="deterministic")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+    __table_args__ = (UniqueConstraint("run_id", "source_url", name="uq_phrase_result_run_url"),)

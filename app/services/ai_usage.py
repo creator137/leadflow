@@ -13,6 +13,7 @@ OPERATION_LABELS = {
     "website_enrichment": "Дополнение данных",
     "email_personalization": "Персональное письмо",
     "connection_test": "Проверка подключения",
+    "phrase_search": "Поиск по фразам",
 }
 FIELD_LABELS = {
     "company_email": "Email компании",
@@ -70,7 +71,7 @@ def _serialize_row(log: AIRequestLog, company: Company | None) -> dict[str, Any]
         "operation": log.operation,
         "operation_label": _operation_label(log.operation),
         "fields": [FIELD_LABELS.get(name, name) for name in missing_fields]
-        if log.operation == "website_enrichment"
+        if log.operation in {"website_enrichment", "phrase_search"}
         else [],
         "result": _result_summary(log),
         "input_tokens": log.input_tokens,
