@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import html
 import re
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, quote_plus, urlsplit
@@ -50,8 +51,8 @@ class FreeSearchProvider:
             try:
                 response = client.get(f"https://search.brave.com/search?q={query}&source=web")
                 response.raise_for_status()
-                for link in BeautifulSoup(response.text, "html.parser").select("a[href]"):
-                    url = self._clean_url(str(link.get("href") or ""))
+                for raw_url in re.findall(r'href="(https?://[^"<>]+)', response.text):
+                    url = self._clean_url(html.unescape(raw_url))
                     if url and url not in found and not urlsplit(url).path.casefold().endswith((".css", ".js", ".png", ".svg", ".ico", ".woff2")):
                         found.append(url)
             except httpx.HTTPError:
