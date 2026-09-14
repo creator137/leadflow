@@ -142,7 +142,7 @@ class ProposalFact(BaseModel):
 class ProposalAIResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     company_summary: str | None = Field(default=None, max_length=500)
-    relevant_facts: list[ProposalFact] = Field(default_factory=list, max_length=5)
+    relevant_facts: list[ProposalFact] = Field(default_factory=list, max_length=2)
     personalized_intro: str | None = Field(default=None, max_length=400)
     relevance_paragraph: str | None = Field(default=None, max_length=700)
     suggested_use_cases: list[str] = Field(default_factory=list, max_length=4)
@@ -169,7 +169,7 @@ PROPOSAL_AI_SCHEMA: dict[str, Any] = {
     "required": ["company_summary", "relevant_facts", "personalized_intro", "relevance_paragraph", "suggested_use_cases", "personalized_cta_hint", "confidence"],
     "properties": {
         "company_summary": {"type": ["string", "null"], "maxLength": 500},
-        "relevant_facts": {"type": "array", "maxItems": 5, "items": {"type": "object", "additionalProperties": False,
+        "relevant_facts": {"type": "array", "maxItems": 2, "items": {"type": "object", "additionalProperties": False,
             "required": ["fact", "evidence", "source_url"], "properties": {
                 "fact": {"type": "string", "maxLength": 400}, "evidence": {"type": "string", "maxLength": 500},
                 "source_url": {"type": "string", "maxLength": 2000}}}},
@@ -181,12 +181,16 @@ PROPOSAL_AI_SCHEMA: dict[str, Any] = {
     },
 }
 
-PROPOSAL_AI_PROMPT = """Верни только JSON по схеме. Используй исключительно переданные фрагменты сайта.
-Каждый факт обязан содержать точную подтверждающую цитату и URL из контекста. Персонализация — один-два
-коротких абзаца, только на основе возвращённых подтверждённых фактов. Если полезного факта нет, верни пустые
-списки и null для персональных блоков. Не пиши HTML. Не меняй цены, условия, контакты, преимущества, подпись
-или основной призыв к действию."""
-PROPOSAL_PROMPT_VERSION = "proposal-personalization-v1"
+PROPOSAL_AI_PROMPT = """Верни только компактный JSON по схеме и пиши полностью на русском языке. Используй
+исключительно переданные фрагменты сайта. Выбери не более двух фактов, которые прямо помогают предложить
+подарки гостям, комплименты, welcome-наборы, брендирование или подарки для подтверждённых мероприятий.
+Не используй адрес, телефон, часы работы и общие описания как повод для персонализации. Каждый выбранный факт
+обязан содержать точную подтверждающую цитату и URL из контекста. personalized_intro начни естественно:
+«Увидели, что…» или «На вашем сайте указано, что…». relevance_paragraph — короткая уместная связь факта с
+предложением фабрики, без новых услуг и догадок. Всего один-два коротких абзаца. Если коммерчески полезного
+факта нет, верни пустые списки и null для персональных блоков. Не пиши HTML. Не меняй цены, условия, контакты,
+преимущества, подпись или основной призыв к действию."""
+PROPOSAL_PROMPT_VERSION = "proposal-personalization-v2"
 
 
 def _norm(value: str) -> str:
@@ -207,7 +211,7 @@ def _validated_evidence(result: ProposalAIResult, analysis: WebsiteAnalysis | No
         source_text = allowed.get(source, "")
         if source_text and evidence and evidence in source_text:
             accepted.append(item.model_dump())
-    return accepted
+    return accepted[:2]
 
 
 def _personalization_text(result: ProposalAIResult, evidence: list[dict[str, str]]) -> str:
