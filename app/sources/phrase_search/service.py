@@ -22,7 +22,8 @@ from app.sources.base import CompanyLead, SourceError
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PHONE_RE = re.compile(r"(?:\+7|8)[\s(.-]*\d{3}[\s).-]*\d{3}[\s.-]*\d{2}[\s.-]*\d{2}")
-EXCLUDED_HOSTS = {"bing.com", "www.bing.com", "duckduckgo.com", "www.duckduckgo.com"}
+EXCLUDED_HOSTS = {"bing.com", "www.bing.com", "duckduckgo.com", "www.duckduckgo.com",
+                  "search.brave.com", "cdn.search.brave.com", "imgs.search.brave.com", "tiles.search.brave.com"}
 
 
 class FreeSearchProvider:
@@ -46,6 +47,17 @@ class FreeSearchProvider:
     def search(self, phrase: str, limit: int) -> list[str]:
         query, found = quote_plus(phrase), []
         with httpx.Client(headers=self.headers, follow_redirects=True, timeout=20) as client:
+            try:
+                response = client.get(f"https://search.brave.com/search?q={query}&source=web")
+                response.raise_for_status()
+                for link in BeautifulSoup(response.text, "html.parser").select("a[href]"):
+                    url = self._clean_url(str(link.get("href") or ""))
+                    if url and url not in found and not urlsplit(url).path.casefold().endswith((".css", ".js", ".png", ".svg", ".ico", ".woff2")):
+                        found.append(url)
+            except httpx.HTTPError:
+                pass
+            if len(found) >= limit:
+                return found[:limit]
             try:
                 response = client.get(f"https://www.bing.com/search?format=rss&q={query}")
                 response.raise_for_status()
