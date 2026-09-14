@@ -8,7 +8,7 @@ from app.config import Settings
 from app.db import Base
 from app.models import AIRequestLog, AISettings, Company, EmailTemplate, WebsiteAnalysis
 from app.services.company_enrichment import WebsiteAnalysisService, WebsitePage, WebsiteSnapshot
-from app.services.deepseek import DeepSeekClient, DeepSeekError
+from app.services.deepseek import DeepSeekClient, DeepSeekError, _output_text
 from app.services.personalized import PersonalizationFragments, _render
 
 
@@ -22,6 +22,12 @@ def response_body(content: dict, *, input_tokens: int = 120, output_tokens: int 
         {"type": "output_text", "text": json.dumps(content, ensure_ascii=False)}
     ]}], "usage": {"input_tokens": input_tokens, "input_tokens_details": {"cached_tokens": 10},
           "output_tokens": output_tokens, "output_tokens_details": {"reasoning_tokens": 0}}}
+
+
+def test_structured_output_accepts_only_an_outer_markdown_json_fence() -> None:
+    payload = response_body({"value": "тест"})
+    payload["output"][0]["content"][0]["text"] = '```json\n{"value":"тест"}\n```'
+    assert json.loads(_output_text(payload)) == {"value": "тест"}
 
 
 def test_responses_api_is_economic_strict_and_accounted() -> None:

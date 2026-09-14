@@ -68,7 +68,12 @@ def _output_text(payload: dict[str, Any]) -> str:
             continue
         for part in item.get("content") or []:
             if part.get("type") == "output_text" and part.get("text"):
-                return str(part["text"])
+                text = str(part["text"]).strip()
+                if text.startswith("```json") and text.endswith("```"):
+                    text = text[7:-3].strip()
+                elif text.startswith("```") and text.endswith("```"):
+                    text = text[3:-3].strip()
+                return text
     raise DeepSeekError("ИИ вернул пустой ответ.", code="empty_response")
 
 
