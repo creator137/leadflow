@@ -804,6 +804,26 @@ def deliveries(status_filter: str | None = None, mailbox: str | None = None, tem
     return list(session.scalars(query))
 
 
+@app.get("/api/deliveries/{delivery_id}/preview")
+def delivery_preview(delivery_id: str, session: Session = Depends(get_db)) -> dict[str, str]:
+    delivery = session.get(EmailDelivery, delivery_id)
+    if not delivery:
+        raise HTTPException(404, "Письмо не найдено.")
+    return {
+        "subject": delivery.subject,
+        "html_body": delivery.html_body,
+        "text_body": delivery.text_body or "",
+    }
+
+
+@app.get("/deliveries/{delivery_id}/preview.html", response_class=HTMLResponse, include_in_schema=False)
+def delivery_preview_page(delivery_id: str, session: Session = Depends(get_db)) -> HTMLResponse:
+    delivery = session.get(EmailDelivery, delivery_id)
+    if not delivery:
+        raise HTTPException(404, "Письмо не найдено.")
+    return HTMLResponse(delivery.html_body)
+
+
 @app.post("/api/companies/{company_id}/send", response_model=DeliveryRead, status_code=202)
 def manual_send(company_id: str, payload: ManualSendCreate, session: Session = Depends(get_db)) -> EmailDelivery:
     company, account, template = session.get(Company, company_id), session.get(MailAccount, payload.mailbox_id), session.get(EmailTemplate, payload.template_id)

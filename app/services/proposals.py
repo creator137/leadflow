@@ -266,6 +266,19 @@ def render_proposal(draft: SheetPersonalizationDraft, company: Company, settings
             "subject": draft.subject or "", "html_body": draft.sent_html_snapshot,
             "text_body": draft.sent_text_snapshot or draft.text_body or "",
         }
+    # Drafts prepared before direction proposal templates were introduced only
+    # contain the rendered snapshot. Keep those previews readable until the
+    # user explicitly refreshes the personalization into the editable format.
+    structured_blocks = (
+        draft.greeting, draft.main_body, draft.ai_personalization,
+        draft.extra_block, draft.cta, draft.signature,
+    )
+    if not any((block or "").strip() for block in structured_blocks) and draft.html_snapshot:
+        return {
+            "subject": draft.subject or "",
+            "html_body": draft.html_snapshot,
+            "text_body": draft.text_body or "",
+        }
     subject = _replace_business_fields(draft.subject or "", company).strip()
     blocks = [draft.greeting, draft.main_body, draft.ai_personalization, draft.extra_block, draft.cta]
     content = "".join(_html_paragraphs(block or "", company) for block in blocks if (block or "").strip())

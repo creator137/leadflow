@@ -115,6 +115,20 @@ def test_draft_is_editable_without_sending_and_renderer_has_logo_and_plain_fallb
         assert "<html" not in rendered["text_body"]
 
 
+def test_legacy_empty_draft_preview_uses_saved_snapshot() -> None:
+    company = Company(
+        source="two_gis", company_name="Старый черновик", normalized_name="старый черновик", raw_data={},
+    )
+    draft = SheetPersonalizationDraft(
+        company_id="company", direction_id="direction", template_id="template",
+        command_key="legacy", status="ready", subject="Старая тема",
+        html_snapshot="<html><body>Сохранённый предпросмотр</body></html>",
+    )
+    rendered = render_proposal(draft, company, Settings(public_base_url="https://leadflow.example"))
+    assert rendered["html_body"] == draft.html_snapshot
+    assert rendered["subject"] == "Старая тема"
+
+
 def test_send_uses_saved_draft_is_idempotent_and_sent_snapshot_is_stable() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

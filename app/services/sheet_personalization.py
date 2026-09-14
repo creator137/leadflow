@@ -160,6 +160,10 @@ def send_sheet_draft(
 
 
 def serialize_draft(draft: SheetPersonalizationDraft) -> dict[str, Any]:
+    structured_blocks = (
+        draft.greeting, draft.main_body, draft.ai_personalization,
+        draft.extra_block, draft.cta, draft.signature,
+    )
     return {
         "id": draft.id, "company_id": draft.company_id, "template_id": draft.template_id,
         "mailbox_id": draft.mailbox_id, "status": draft.status, "subject": draft.subject,
@@ -170,5 +174,6 @@ def serialize_draft(draft: SheetPersonalizationDraft) -> dict[str, Any]:
         "html_body": draft.html_body, "text_body": draft.text_body, "html_snapshot": draft.html_snapshot,
         "facts": draft.facts,
         "request_key": draft.request_key, "delivery_id": draft.delivery_id,
+        "legacy_format": not draft.proposal_template_id or not any((value or "").strip() for value in structured_blocks),
         "error": draft.error, "created_at": draft.created_at, "updated_at": draft.updated_at,
     }
