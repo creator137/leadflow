@@ -42,6 +42,19 @@ def run() -> None:
         browser = pw.chromium.launch(headless=True)
         context = browser.new_context(http_credentials={"username": auth[0], "password": auth[1]}, locale="ru-RU")
         page = context.new_page()
+        bootstrap_stub = """window.bootstrap={
+          Modal:class{show(){} hide(){}},
+          Toast:{getOrCreateInstance:()=>({show(){}})},
+          Offcanvas:{getOrCreateInstance:()=>({show(){}})}
+        };"""
+        page.route(
+            "https://cdn.jsdelivr.net/**",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/css" if route.request.resource_type == "stylesheet" else "application/javascript",
+                body="" if route.request.resource_type == "stylesheet" else bootstrap_stub,
+            ),
+        )
         page.goto("http://127.0.0.1:8000/#analytics", wait_until="domcontentloaded", timeout=60_000)
         page.wait_for_selector("#analyticsBody .metric-card", timeout=60_000)
         integer_labels = {
