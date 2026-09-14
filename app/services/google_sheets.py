@@ -31,8 +31,8 @@ from app.models import (
 from app.services.provenance import apply_field
 from app.services.secrets import decrypt_secret, encrypt_secret
 
-# New worksheets start with the website address. Existing worksheets are mapped
-# positionally and migrated to the same order during their next synchronization.
+# New worksheets start with the website address. The first twelve columns are
+# the shared business area; manual workflow columns may safely follow it.
 COLUMNS: tuple[tuple[str, str], ...] = (
     ("Сайт", "website"), ("Начало общения / Дата", "communication_started_at"), ("Наименование клиента", "company_name"),
     ("Область", "region"), ("Город", "city"), ("Кол-во филиалов", "branches_count"),
@@ -42,6 +42,7 @@ COLUMNS: tuple[tuple[str, str], ...] = (
     ("Действие", "action"), ("Результат?", "result"),
     ("LeadFlow ID", "id"),
 )
+BUSINESS_COLUMNS = COLUMNS[:12]
 HEADERS = [header for header, _ in COLUMNS]
 MANUAL_FIELDS = {
     "communication_started_at", "region", "city", "branches_count", "address", "company_email",
@@ -103,20 +104,20 @@ def discover_schema(rows: list[list[str]]) -> SheetSchema:
         value = _normalized(raw)
         if not value:
             continue
-        if value.startswith("начало общения"): fields["communication_started_at"] = index
-        elif value == "наименование клиента": fields["company_name"] = index
-        elif value in {"область", "регион"}: fields["region"] = index
-        elif value == "город": fields["city"] = index
-        elif "кол-во филиалов" in value or "количество филиалов" in value: fields["branches_count"] = index
-        elif value == "адрес": fields["address"] = index
-        elif value == "лпр": fields["decision_maker_name"] = index
-        elif value in {"сайт", "веб-сайт", "website"}: fields["website"] = index
-        elif value == "инн": fields["inn"] = index
+        if value.startswith("начало общения"): fields.setdefault("communication_started_at", index)
+        elif value == "наименование клиента": fields.setdefault("company_name", index)
+        elif value in {"область", "регион"}: fields.setdefault("region", index)
+        elif value == "город": fields.setdefault("city", index)
+        elif "кол-во филиалов" in value or "количество филиалов" in value: fields.setdefault("branches_count", index)
+        elif value == "адрес": fields.setdefault("address", index)
+        elif value == "лпр": fields.setdefault("decision_maker_name", index)
+        elif value in {"сайт", "веб-сайт", "website"}: fields.setdefault("website", index)
+        elif value == "инн": fields.setdefault("inn", index)
         elif value == "почта": email_columns.append(index)
         elif value == "телефон": phone_columns.append(index)
         elif value == "действие": actions.append(index)
         elif value in {"результат", "результат?"}: results.append(index)
-        elif value == "leadflow id": fields["id"] = index
+        elif value == "leadflow id": fields.setdefault("id", index)
         if (configured_status and value == configured_status) or ("статус" in value and "почт" in value):
             email_status_column = index
     if email_columns: fields["company_email"] = email_columns[0]
@@ -144,26 +145,72 @@ def company_row(company: Company) -> list[str]:
     return [_text(getattr(company, field_name)) for _, field_name in COLUMNS]
 
 
-def _move_website_column_first(worksheet, rows: list[list[str]]) -> bool:
-    """Move an existing website column to A without rewriting cell contents."""
-    try:
-        schema = discover_schema(rows)
-        website_column = schema.fields.get("website")
-        if not website_column or website_column == 1:
-            return False
-        _retry(lambda: worksheet.spreadsheet.batch_update({"requests": [{"moveDimension": {
-            "source": {
-                "sheetId": worksheet.id,
-                "dimension": "COLUMNS",
-                "startIndex": website_column - 1,
-                "endIndex": website_column,
-            },
-            "destinationIndex": 0,
-        }}]}))
-        return True
-    except (AttributeError, gspread.exceptions.APIError, requests.RequestException, TransportError):
-        logger.warning("Could not move the website column to the beginning", exc_info=True)
-        return False
+def _website_columns(header: list[str]) -> list[int]:
+    return [
+        index for index, value in enumerate(header, 1)
+        if _normalized(value) in {"сайт", "веб-сайт", "website"}
+    ]
+
+
+def _move_column_left(worksheet: Any, source: int, destination: int) -> None:
+    if source <= destination:
+        return
+    body = {"requests": [{"moveDimension": {
+        "source": {
+            "sheetId": worksheet.id,
+            "dimension": "COLUMNS",
+            "startIndex": source - 1,
+            "endIndex": source,
+        },
+        "destinationIndex": destination - 1,
+    }}]}
+    _retry(lambda: worksheet.spreadsheet.batch_update(body))
+
+
+def standardize_business_columns(worksheet: Any, rows: list[list[str]]) -> list[list[str]]:
+    """Keep one Website column at A and align the safe business area A:L.
+
+    Moving/inserting whole columns through the Sheets API preserves formulas,
+    formatting and manual workflow data that live to the right of this area.
+    """
+    schema = discover_schema(rows)
+    header = rows[schema.header_row - 1][:]
+    website_columns = _website_columns(header)
+    if len(website_columns) > 1:
+        primary = website_columns[0]
+        updates: list[dict[str, Any]] = []
+        for row_number, row in enumerate(rows[schema.data_row - 1:], start=schema.data_row):
+            current = row[primary - 1].strip() if len(row) >= primary else ""
+            if current:
+                continue
+            replacement = next(
+                (row[column - 1].strip() for column in website_columns[1:] if len(row) >= column and row[column - 1].strip()),
+                "",
+            )
+            if replacement:
+                updates.append({"range": f"{_column_letter(primary)}{row_number}", "values": [[replacement]]})
+        if updates:
+            _retry(lambda: worksheet.batch_update(updates))
+        for column in reversed(website_columns[1:]):
+            _retry(lambda column=column: worksheet.delete_columns(column))
+            for row in rows:
+                if len(row) >= column:
+                    row.pop(column - 1)
+        header = rows[schema.header_row - 1][:]
+
+    for destination, (title, field_name) in enumerate(BUSINESS_COLUMNS, start=1):
+        current_schema = discover_schema([header])
+        source = current_schema.fields.get(field_name)
+        if source is None:
+            values = [[""] for _ in range(schema.header_row - 1)] + [[title]]
+            _retry(lambda values=values, destination=destination: worksheet.insert_cols(values, col=destination))
+            header.insert(destination - 1, title)
+        elif source > destination:
+            _move_column_left(worksheet, source, destination)
+            header.insert(destination - 1, header.pop(source - 1))
+        elif source < destination:
+            raise ValueError(f"Cannot safely align sheet column {field_name}: {source} -> {destination}")
+    return _retry(worksheet.get_all_values)
 
 
 def _parse_manual(field_name: str, value: str) -> Any:
@@ -213,8 +260,7 @@ class GoogleSheetsSyncService:
         if not rows or not any(any(cell.strip() for cell in row) for row in rows):
             _retry(lambda: worksheet.update(range_name=f"A1:{_column_letter(len(COLUMNS))}1", values=[HEADERS]))
             rows = [HEADERS]
-        elif _move_website_column_first(worksheet, rows):
-            rows = _retry(worksheet.get_all_values)
+        rows = standardize_business_columns(worksheet, rows)
         schema = discover_schema(rows)
         header = rows[schema.header_row - 1]
         for field_name, field_header in (("branches_count", "Кол-во филиалов"), ("website", "Сайт"), ("inn", "ИНН")):

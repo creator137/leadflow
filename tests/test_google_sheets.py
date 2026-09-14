@@ -4,7 +4,8 @@ from sqlalchemy.orm import Session
 from app.db import Base
 from app.models import Company, CompanyDirection, CompanyFieldProvenance, Direction, GoogleSheetsConfig, SheetRowMapping
 from app.services.google_sheets import (
-    COLUMNS, HEADERS, GoogleSheetsSyncService, _move_website_column_first, _retry, discover_schema,
+    BUSINESS_COLUMNS, COLUMNS, HEADERS, GoogleSheetsSyncService, _retry,
+    discover_schema, standardize_business_columns,
 )
 from app.services.provenance import apply_field
 
@@ -12,6 +13,8 @@ from app.services.provenance import apply_field
 class FakeWorksheet:
     def __init__(self):
         self.rows = []
+        self.id = 1
+        self.spreadsheet = self
 
     def get_all_values(self):
         return [row[:] for row in self.rows]
@@ -32,6 +35,15 @@ class FakeWorksheet:
         pass
 
     def batch_update(self, updates):
+        if isinstance(updates, dict):
+            move = updates["requests"][0]["moveDimension"]
+            source = move["source"]["startIndex"]
+            destination = move["destinationIndex"]
+            for row in self.rows:
+                while len(row) <= source:
+                    row.append("")
+                row.insert(destination, row.pop(source))
+            return
         from gspread.utils import a1_to_rowcol
         for update in updates:
             row, column = a1_to_rowcol(update["range"])
@@ -41,23 +53,15 @@ class FakeWorksheet:
                 self.rows[row - 1].append("")
             self.rows[row - 1][column - 1] = update["values"][0][0]
 
+    def delete_columns(self, column):
+        for row in self.rows:
+            if len(row) >= column:
+                row.pop(column - 1)
 
-def test_existing_website_column_is_moved_to_first_position() -> None:
-    class Spreadsheet:
-        body = None
-
-        def batch_update(self, body):
-            self.body = body
-
-    worksheet = type("Worksheet", (), {"id": 42, "spreadsheet": Spreadsheet()})()
-    rows = [["Наименование клиента", "Город", "Адрес", "Сайт"]]
-
-    assert _move_website_column_first(worksheet, rows) is True
-    move = worksheet.spreadsheet.body["requests"][0]["moveDimension"]
-    assert move["source"] == {
-        "sheetId": 42, "dimension": "COLUMNS", "startIndex": 3, "endIndex": 4,
-    }
-    assert move["destinationIndex"] == 0
+    def insert_cols(self, values, col=1):
+        for row_number, row in enumerate(self.rows, 1):
+            value = values[row_number - 1][0] if row_number <= len(values) and values[row_number - 1] else ""
+            row.insert(col - 1, value)
 
 
 def setup_company(session: Session):
@@ -216,13 +220,13 @@ def test_existing_sheet_gets_website_column_and_preserves_manual_value() -> None
         worksheet.rows = [["Наименование клиента", "Город", "Адрес", "LeadFlow ID"]]
         service = GoogleSheetsSyncService(session, config)
         service.sync_direction(direction, worksheet=worksheet)
-        assert worksheet.rows[0][4] == "Кол-во филиалов"
-        assert worksheet.rows[0][5] == "Сайт"
-        assert worksheet.rows[1][5] == "https://parser.example"
-        worksheet.rows[1][5] = "https://www.manual.example/"
+        assert worksheet.rows[0][0] == "Сайт"
+        assert worksheet.rows[0][5] == "Кол-во филиалов"
+        assert worksheet.rows[1][0] == "https://parser.example"
+        worksheet.rows[1][0] = "https://www.manual.example/"
         service.sync_direction(direction, worksheet=worksheet)
         assert company.website == "https://manual.example"
-        assert worksheet.rows[1][5] == "https://www.manual.example/"
+        assert worksheet.rows[1][0] == "https://www.manual.example/"
         provenance_count = session.query(CompanyFieldProvenance).filter_by(
             company_id=company.id, field="website", discovery_method="manual",
         ).count()
@@ -245,6 +249,42 @@ def test_unchanged_system_value_can_be_updated_after_snapshot() -> None:
         company.website = "https://new.example"
         service.sync_direction(direction, worksheet=worksheet)
         assert worksheet.rows[1][0] == "https://new.example"
+
+
+def test_existing_early_website_column_wins_and_duplicate_is_removed() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction, company, config = setup_company(session)
+        worksheet = FakeWorksheet()
+        worksheet.rows = [
+            ["Начало общения / Дата", "Наименование клиента", "Область", "Город", "Кол-во филиалов",
+             "Адрес", "Почта", "Телефон", "Сайт", "ЛПР", "Почта", "Телефон", "Действие",
+             "Результат?", "LeadFlow ID", "Сайт"],
+            ["", company.company_name, "", company.city, "", company.address, company.company_email,
+             company.company_phone, "", "", "", "", "", "", company.id, "https://saved.example"],
+        ]
+
+        GoogleSheetsSyncService(session, config).sync_direction(direction, worksheet=worksheet)
+
+        assert worksheet.rows[0].count("Сайт") == 1
+        assert worksheet.rows[0][0] == "Сайт"
+        assert worksheet.rows[1][0] == "https://saved.example"
+        assert company.website == "https://saved.example"
+
+
+def test_legacy_second_row_header_is_aligned_without_touching_title_row() -> None:
+    worksheet = FakeWorksheet()
+    worksheet.rows = [
+        ["Кафе"],
+        ["Начало общения / Дата", "Наименование клиента", "Область", "Город", "Адрес",
+         "Почта", "Телефон", "Сайт", "ЛПР", "Почта", "Телефон", "Действие", "Результат"],
+    ]
+
+    rows = standardize_business_columns(worksheet, worksheet.get_all_values())
+
+    assert "Кафе" in rows[0][:12]
+    assert rows[1][:12] == [title for title, _ in BUSINESS_COLUMNS]
 
 
 def test_manual_value_can_be_changed_again_after_snapshot() -> None:
