@@ -69,15 +69,17 @@ def test_sheet_command_prepares_once_by_stable_leadflow_id(monkeypatch) -> None:
         worksheet.rows[1][action_column] = "Подготовить персональное КП"
         calls = 0
 
-        def fake_prepare(*_args, **_kwargs):
+        def fake_prepare(_session, _company, _settings, **kwargs):
             nonlocal calls
             calls += 1
-            return {
-                "request_key": "request-key", "subject": "Персональное КП", "html_body": "<p>Факт</p>",
-                "text_body": "Факт", "facts": [{"text": "Проверенный факт", "url": "https://example.test"}],
-            }
+            draft = _session.scalar(select(SheetPersonalizationDraft).where(SheetPersonalizationDraft.command_key == kwargs["command_key"]))
+            draft.request_key = "request-key"; draft.subject = "Персональное КП"
+            draft.html_body = "<p>Факт</p>"; draft.text_body = "Факт"
+            draft.facts = [{"fact": "Проверенный факт", "source_url": "https://example.test", "evidence": "Факт"}]
+            draft.status = "ready"; _session.commit()
+            return draft
 
-        monkeypatch.setattr("app.services.sheet_personalization.prepare_personalization", fake_prepare)
+        monkeypatch.setattr("app.services.sheet_personalization.prepare_proposal_draft", fake_prepare)
         settings = Settings(public_base_url="https://leadflow.example")
         first = process_sheet_personalization_triggers(session, config, direction, settings, worksheet=worksheet)
         second = process_sheet_personalization_triggers(session, config, direction, settings, worksheet=worksheet)
@@ -106,22 +108,22 @@ def test_sheet_draft_confirmation_is_idempotent(monkeypatch) -> None:
         session.add(draft); session.commit()
         calls = 0
 
-        def fake_send(_session, _company, _mailbox, _template, request_key, _settings, *, overrides=None):
+        def fake_send(_session, draft, _settings):
             nonlocal calls
             calls += 1
-            existing = _session.scalar(select(EmailDelivery).where(EmailDelivery.idempotency_key == f"personalized:{_company.id}:{request_key}"))
+            existing = _session.scalar(select(EmailDelivery).where(EmailDelivery.idempotency_key == f"proposal-draft:{draft.id}:send"))
             if existing:
                 return existing
             delivery = EmailDelivery(
-                company_id=_company.id, mailbox_id=_mailbox.id, template_id=_template.id,
-                recipient_email=_company.company_email, subject=overrides["subject"], html_body=overrides["html_body"],
-                text_body=overrides["text_body"], status="queued", send_mode="personalized",
+                company_id=draft.company_id, mailbox_id=draft.mailbox_id, template_id=draft.template_id,
+                recipient_email="owner@example.test", subject=draft.subject, html_body=draft.html_body,
+                text_body=draft.text_body, status="queued", send_mode="personalized",
                 tracking_token="track", unsubscribe_token="unsubscribe",
-                idempotency_key=f"personalized:{_company.id}:{request_key}",
+                idempotency_key=f"proposal-draft:{draft.id}:send",
             )
-            _session.add(delivery); _session.commit(); return delivery
+            _session.add(delivery); _session.flush(); draft.delivery_id = delivery.id; _session.commit(); return delivery
 
-        monkeypatch.setattr("app.services.sheet_personalization.send_personalized", fake_send)
+        monkeypatch.setattr("app.services.sheet_personalization.send_proposal_draft", fake_send)
         first = send_sheet_draft(session, draft.id, Settings())
         second = send_sheet_draft(session, draft.id, Settings())
         assert first.id == second.id and calls == 1

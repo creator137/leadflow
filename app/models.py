@@ -314,6 +314,29 @@ class EmailTemplate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class DirectionProposalTemplate(Base):
+    __tablename__ = "direction_proposal_templates"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    direction_id: Mapped[str] = mapped_column(
+        ForeignKey("directions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    greeting: Mapped[str] = mapped_column(Text, nullable=False)
+    main_body: Mapped[str] = mapped_column(Text, nullable=False)
+    extra_block: Mapped[str] = mapped_column(Text, default="")
+    cta: Mapped[str] = mapped_column(Text, nullable=False)
+    signature: Mapped[str] = mapped_column(Text, nullable=False)
+    ai_instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    ai_personalization_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (UniqueConstraint("direction_id", name="uq_direction_proposal_template_direction"),)
+
+
 class Campaign(Base):
     __tablename__ = "campaigns"
 
@@ -498,15 +521,30 @@ class SheetPersonalizationDraft(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
     direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), nullable=False, index=True)
-    config_id: Mapped[str] = mapped_column(ForeignKey("google_sheets_config.id", ondelete="CASCADE"), nullable=False)
+    config_id: Mapped[str | None] = mapped_column(ForeignKey("google_sheets_config.id", ondelete="CASCADE"))
     template_id: Mapped[str] = mapped_column(ForeignKey("email_templates.id"), nullable=False)
+    proposal_template_id: Mapped[str | None] = mapped_column(
+        ForeignKey("direction_proposal_templates.id", ondelete="SET NULL"), index=True
+    )
+    template_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     mailbox_id: Mapped[str | None] = mapped_column(ForeignKey("mail_accounts.id"))
     command_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     request_key: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="preparing", index=True)
     subject: Mapped[str | None] = mapped_column(Text)
+    greeting: Mapped[str | None] = mapped_column(Text)
+    main_body: Mapped[str | None] = mapped_column(Text)
+    ai_personalization: Mapped[str | None] = mapped_column(Text)
+    extra_block: Mapped[str | None] = mapped_column(Text)
+    cta: Mapped[str | None] = mapped_column(Text)
+    signature: Mapped[str | None] = mapped_column(Text)
+    ai_evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    ai_response_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     html_body: Mapped[str | None] = mapped_column(Text)
     text_body: Mapped[str | None] = mapped_column(Text)
+    html_snapshot: Mapped[str | None] = mapped_column(Text)
+    sent_html_snapshot: Mapped[str | None] = mapped_column(Text)
+    sent_text_snapshot: Mapped[str | None] = mapped_column(Text)
     facts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     delivery_id: Mapped[str | None] = mapped_column(ForeignKey("email_deliveries.id", ondelete="SET NULL"), unique=True)
     error: Mapped[str | None] = mapped_column(Text)

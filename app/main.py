@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -17,7 +17,7 @@ from app.config import get_settings, validate_production_secrets
 from app.db import SessionLocal, get_db
 from app.models import (
     AIConfig, Campaign, Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord,
-    Direction, DirectionRun, EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun,
+    Direction, DirectionProposalTemplate, DirectionRun, EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun,
     MailAccount, ParserRun, PhraseSearchResult, PhraseSearchRun, SheetPersonalizationDraft, SheetRowMapping, SourceJob, Suppression, TrackedLink,
 )
 from app.schemas import (
@@ -26,6 +26,7 @@ from app.schemas import (
     EmailTemplateRead, EmailTemplateUpdate, GoogleSheetsConfigCreate, GoogleSheetsConfigRead, MailAccountCreate,
     MailAccountRead, MailAccountUpdate, ManualSendCreate, ParserRunRead, SuppressionCreate, TemplatePreview, TemplateTestSend,
     AISettingsUpdate, PersonalizationPreviewCreate, PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead,
+    ProposalDraftCreate, ProposalDraftUpdate, ProposalTemplateUpdate, ProposalTestSend,
     SheetActionRequest, SourceJobCreate, SourceJobRead, SourceJobUpdate,
 )
 from app.services.collection import execute_job
@@ -36,11 +37,16 @@ from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.data_quality import backfill_structured_business_fields
 from app.services.directions import archive_direction, create_direction, serialize_direction, update_direction
 from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_config, sync_companies, worksheet_from_config
-from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, execute_campaign, process_queue, render_template_parts
+from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, execute_campaign, process_queue, render_template_parts, send_delivery
 from app.services.deepseek import DeepSeekClient, DeepSeekError, ai_settings as get_ai_settings
 from app.services.personalized import PersonalizationFragments, prepare_personalization, send_personalized
 from app.services.sheet_personalization import send_sheet_draft, serialize_draft
 from app.services.sheet_actions import execute_sheet_action
+from app.services.proposals import (
+    ensure_all_proposal_templates, finalize_proposal_delivery, prepare_proposal_draft, render_proposal,
+    send_proposal_draft, serialize_proposal_template, update_proposal_draft,
+)
+from app.services.sheet_personalization import _default_mailbox
 from app.services.secrets import decrypt_secret, encrypt_secret
 from app.services.provenance import apply_field
 from app.services.user_errors import human_error
@@ -56,6 +62,7 @@ def security_startup_check() -> None:
     validate_production_secrets(get_settings())
     with SessionLocal() as session:
         backfill_structured_business_fields(session)
+        ensure_all_proposal_templates(session)
 
 
 @app.middleware("http")
@@ -68,7 +75,7 @@ async def optional_basic_auth(request: Request, call_next):
         if not configured or not supplied or not secrets.compare_digest(supplied, configured):
             return Response("Unauthorized", status_code=401)
         return await call_next(request)
-    protected = request.url.path == "/" or request.url.path.startswith(("/api", "/docs", "/redoc", "/openapi"))
+    protected = request.url.path == "/" or request.url.path.startswith(("/api", "/docs", "/redoc", "/openapi", "/proposal-drafts"))
     if protected and settings.admin_username and settings.admin_password:
         authorization = request.headers.get("Authorization", "")
         valid = False
@@ -91,6 +98,11 @@ async def optional_basic_auth(request: Request, call_next):
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def admin_panel() -> str:
     return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/email-assets/bogorodsky-pryanik-logo.jpg", include_in_schema=False)
+def proposal_logo() -> FileResponse:
+    return FileResponse(Path(__file__).parent.parent / "logo.jpg", media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/health")
@@ -595,6 +607,137 @@ def test_send_template(template_id: str, payload: TemplateTestSend, session: Ses
         raise HTTPException(409, human_error(exc)) from exc
     process_queue(session, get_settings(), "api-test-send", 1)
     session.refresh(delivery); return delivery
+
+
+@app.get("/api/proposal-templates")
+def proposal_templates(session: Session = Depends(get_db)) -> list[dict[str, object]]:
+    ensure_all_proposal_templates(session)
+    rows = session.execute(
+        select(DirectionProposalTemplate, Direction)
+        .join(Direction, Direction.id == DirectionProposalTemplate.direction_id)
+        .where(Direction.archived_at.is_(None)).order_by(Direction.name)
+    ).all()
+    return [serialize_proposal_template(template, direction) for template, direction in rows]
+
+
+@app.patch("/api/proposal-templates/{template_id}")
+def update_proposal_template(
+    template_id: str, payload: ProposalTemplateUpdate, session: Session = Depends(get_db),
+) -> dict[str, object]:
+    template = session.get(DirectionProposalTemplate, template_id)
+    if not template:
+        raise HTTPException(404, "Шаблон КП не найден.")
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(template, key, value)
+    template.version += 1
+    session.commit()
+    session.refresh(template)
+    return serialize_proposal_template(template, session.get(Direction, template.direction_id))
+
+
+@app.post("/api/companies/{company_id}/proposal-drafts", status_code=201)
+def create_proposal_draft(
+    company_id: str, payload: ProposalDraftCreate, session: Session = Depends(get_db),
+) -> dict[str, object]:
+    company = session.get(Company, company_id)
+    mailbox = session.get(MailAccount, payload.mailbox_id) if payload.mailbox_id else _default_mailbox(session)
+    if not company:
+        raise HTTPException(404, "Компания не найдена.")
+    if not mailbox:
+        raise HTTPException(409, "Почтовый ящик не настроен.")
+    try:
+        draft = prepare_proposal_draft(
+            session, company, get_settings(), mailbox=mailbox,
+            config=active_sheets_config(session, get_settings()), regenerate=payload.regenerate,
+        )
+        return serialize_draft(draft)
+    except (DeepSeekError, ValueError) as exc:
+        raise HTTPException(409, human_error(exc)) from exc
+
+
+@app.patch("/api/proposal-drafts/{draft_id}")
+def save_proposal_draft(
+    draft_id: str, payload: ProposalDraftUpdate, session: Session = Depends(get_db),
+) -> dict[str, object]:
+    draft = session.get(SheetPersonalizationDraft, draft_id)
+    if not draft:
+        raise HTTPException(404, "Черновик КП не найден.")
+    if payload.mailbox_id and not session.get(MailAccount, payload.mailbox_id):
+        raise HTTPException(404, "Почтовый ящик не найден.")
+    try:
+        return serialize_draft(update_proposal_draft(session, draft, payload.model_dump(exclude_unset=True), get_settings()))
+    except ValueError as exc:
+        raise HTTPException(409, human_error(exc)) from exc
+
+
+@app.post("/api/proposal-drafts/{draft_id}/regenerate")
+def regenerate_proposal_draft(draft_id: str, session: Session = Depends(get_db)) -> dict[str, object]:
+    draft = session.get(SheetPersonalizationDraft, draft_id)
+    if not draft:
+        raise HTTPException(404, "Черновик КП не найден.")
+    company = session.get(Company, draft.company_id)
+    mailbox = session.get(MailAccount, draft.mailbox_id) if draft.mailbox_id else _default_mailbox(session)
+    try:
+        refreshed = prepare_proposal_draft(
+            session, company, get_settings(), mailbox=mailbox,
+            config=session.get(GoogleSheetsConfig, draft.config_id) if draft.config_id else None,
+            command_key=draft.command_key, regenerate=True,
+        )
+        return serialize_draft(refreshed)
+    except (DeepSeekError, ValueError) as exc:
+        raise HTTPException(409, human_error(exc)) from exc
+
+
+@app.get("/api/proposal-drafts/{draft_id}/preview")
+def preview_proposal_draft(draft_id: str, session: Session = Depends(get_db)) -> dict[str, str]:
+    draft = session.get(SheetPersonalizationDraft, draft_id)
+    company = session.get(Company, draft.company_id) if draft else None
+    if not draft or not company:
+        raise HTTPException(404, "Черновик КП не найден.")
+    return render_proposal(draft, company, get_settings())
+
+
+@app.get("/proposal-drafts/{draft_id}/preview.html", response_class=HTMLResponse, include_in_schema=False)
+def proposal_preview_page(draft_id: str, session: Session = Depends(get_db)) -> HTMLResponse:
+    draft = session.get(SheetPersonalizationDraft, draft_id)
+    company = session.get(Company, draft.company_id) if draft else None
+    if not draft or not company:
+        raise HTTPException(404, "Черновик КП не найден.")
+    return HTMLResponse(render_proposal(draft, company, get_settings())["html_body"])
+
+
+@app.post("/api/proposal-drafts/{draft_id}/test-send", response_model=DeliveryRead)
+def test_send_proposal(draft_id: str, payload: ProposalTestSend, session: Session = Depends(get_db)) -> EmailDelivery:
+    draft = session.get(SheetPersonalizationDraft, draft_id)
+    if not draft:
+        raise HTTPException(404, "Черновик КП не найден.")
+    try:
+        delivery = send_proposal_draft(
+            session, draft, get_settings(), recipient_override=payload.recipient_email, send_mode="test",
+        )
+        if delivery.status == "queued":
+            send_delivery(session, delivery, session.get(MailAccount, delivery.mailbox_id))
+        session.refresh(delivery)
+        return delivery
+    except ValueError as exc:
+        raise HTTPException(409, human_error(exc)) from exc
+
+
+@app.post("/api/proposal-drafts/{draft_id}/confirm-send", response_model=DeliveryRead)
+def confirm_send_proposal(draft_id: str, session: Session = Depends(get_db)) -> EmailDelivery:
+    draft = session.get(SheetPersonalizationDraft, draft_id)
+    if not draft:
+        raise HTTPException(404, "Черновик КП не найден.")
+    try:
+        delivery = send_proposal_draft(session, draft, get_settings())
+        if delivery.status == "queued":
+            account = session.get(MailAccount, delivery.mailbox_id)
+            send_delivery(session, delivery, account)
+            session.refresh(delivery)
+        finalize_proposal_delivery(session, draft, delivery)
+        return delivery
+    except ValueError as exc:
+        raise HTTPException(409, human_error(exc)) from exc
 
 
 @app.get("/api/campaigns", response_model=list[CampaignRead])

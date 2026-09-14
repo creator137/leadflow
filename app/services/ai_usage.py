@@ -53,7 +53,10 @@ def _result_summary(log: AIRequestLog) -> str:
         return "Подключение подтверждено"
     if log.operation == "email_personalization":
         subject = str(data.get("subject") or "").strip()
-        return f"Подготовлена тема: {subject}" if subject else "Подготовлены фрагменты письма"
+        facts = data.get("relevant_facts") if isinstance(data.get("relevant_facts"), list) else []
+        return f"Подготовлена тема: {subject}" if subject else (
+            f"Подтверждённых фактов: {len(facts)}" if facts else "Подготовлен нейтральный вариант без догадок"
+        )
     fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
     found = [FIELD_LABELS.get(name, name) for name, value in fields.items() if value not in (None, "")]
     return "Найдено: " + ", ".join(found) if found else "Новых достоверных данных не найдено"
@@ -185,6 +188,8 @@ def ai_usage_details(session: Session, log_id: str) -> dict[str, Any] | None:
     exact_context = bool(analysis and log.content_hash and analysis.content_hash == log.content_hash)
     data = log.response_data or {}
     evidence = data.get("evidence") if isinstance(data.get("evidence"), list) else []
+    if log.operation == "email_personalization" and isinstance(data.get("relevant_facts"), list):
+        evidence = data["relevant_facts"]
     found_values = []
     fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
     for name, value in fields.items():
@@ -207,6 +212,14 @@ def ai_usage_details(session: Session, log_id: str) -> dict[str, Any] | None:
                 "evidence_text": proof.get("evidence_text"),
             }
         )
+    if log.operation == "email_personalization":
+        for index, item in enumerate(evidence, 1):
+            if not isinstance(item, dict) or not item.get("fact"):
+                continue
+            found_values.append({
+                "field": f"fact_{index}", "label": "Факт с сайта", "value": item.get("fact"),
+                "source_url": item.get("source_url"), "evidence_text": item.get("evidence"),
+            })
     if log.operation == "website_enrichment":
         reason = "На сайте компании искались только пустые поля: " + (
             ", ".join(row["fields"]) if row["fields"] else "список полей не сохранён"
@@ -214,7 +227,7 @@ def ai_usage_details(session: Session, log_id: str) -> dict[str, Any] | None:
         context = (analysis.page_blocks or []) if exact_context else []
     elif log.operation == "email_personalization":
         reason = "Пользователь запросил персональное письмо на основании проверенных фактов о компании."
-        context = (analysis.facts or []) if exact_context else []
+        context = (analysis.page_blocks or []) if exact_context else []
     else:
         reason = "Пользователь проверил подключение LeadFlow к DeepSeek."
         context = []
@@ -232,9 +245,9 @@ def ai_usage_details(session: Session, log_id: str) -> dict[str, Any] | None:
         "found_values": found_values,
         "evidence": evidence,
         "personalization": {
-            "subject": data.get("subject"),
-            "intro": data.get("intro"),
-            "personalized_paragraph": data.get("personalized_paragraph"),
+            "subject": data.get("subject") or data.get("company_summary"),
+            "intro": data.get("intro") or data.get("personalized_intro"),
+            "personalized_paragraph": data.get("personalized_paragraph") or data.get("relevance_paragraph"),
         }
         if log.operation == "email_personalization"
         else None,

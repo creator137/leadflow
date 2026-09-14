@@ -465,6 +465,38 @@ class PersonalizationPreviewCreate(BaseModel):
     regenerate: bool = False
 
 
+class ProposalDraftCreate(BaseModel):
+    mailbox_id: str | None = None
+    regenerate: bool = False
+
+
+class ProposalDraftUpdate(BaseModel):
+    subject: str | None = Field(default=None, max_length=500)
+    greeting: str | None = Field(default=None, max_length=2000)
+    main_body: str | None = Field(default=None, max_length=10_000)
+    ai_personalization: str | None = Field(default=None, max_length=4000)
+    extra_block: str | None = Field(default=None, max_length=4000)
+    cta: str | None = Field(default=None, max_length=4000)
+    signature: str | None = Field(default=None, max_length=4000)
+    mailbox_id: str | None = None
+
+
+class ProposalTemplateUpdate(BaseModel):
+    subject: str | None = Field(default=None, max_length=500)
+    greeting: str | None = Field(default=None, max_length=2000)
+    main_body: str | None = Field(default=None, max_length=10_000)
+    extra_block: str | None = Field(default=None, max_length=4000)
+    cta: str | None = Field(default=None, max_length=4000)
+    signature: str | None = Field(default=None, max_length=4000)
+    ai_instruction: str | None = Field(default=None, max_length=4000)
+    ai_personalization_enabled: bool | None = None
+    active: bool | None = None
+
+
+class ProposalTestSend(BaseModel):
+    recipient_email: str
+
+
 class AISettingsUpdate(BaseModel):
     enrichment_enabled: bool | None = None
     personalization_enabled: bool | None = None

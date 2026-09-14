@@ -1,0 +1,24 @@
+.proposal-card-copy {
+  white-space: pre-line;
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.proposal-preview-wrap {
+  width: min(100%, 720px);
+  margin: 0 auto;
+  transition: width .2s ease;
+}
+.proposal-preview-wrap.mobile {
+  width: 390px;
+  max-width: 100%;
+}
+.proposal-preview-wrap iframe {
+  display: block;
+  width: 100%;
+  height: 680px;
+  border: 1px solid #dce5e2;
+  border-radius: 10px;
+  background: #fff;
+}

@@ -11,8 +11,8 @@ from app.config import Settings
 from app.models import Company, CompanyDirection, Direction, EmailDelivery, SheetPersonalizationDraft
 from app.services.google_sheets import _column_letter, _retry, active_sheets_config, discover_schema, worksheet_from_config
 from app.services.mailing import send_delivery
-from app.services.personalized import prepare_personalization
-from app.services.sheet_personalization import PREVIEW_HEADER, STATUS_HEADER, _default_mailbox, _default_template, _ensure_column, send_sheet_draft
+from app.services.proposals import delivery_template_for_direction, ensure_proposal_template, finalize_proposal_delivery, prepare_proposal_draft
+from app.services.sheet_personalization import PREVIEW_HEADER, STATUS_HEADER, _default_mailbox, _ensure_column, send_sheet_draft
 
 
 def _direction(session: Session, company_id: str) -> Direction | None:
@@ -62,10 +62,12 @@ def execute_sheet_action(session: Session, company_id: str, action: str, setting
         raise ValueError("Направление компании не найдено")
     worksheet, row, status_column, preview_column = _sheet_row(session, company_id, direction, settings)
     config = active_sheets_config(session, settings)
-    template, mailbox = _default_template(session, direction), _default_mailbox(session)
-    if not template: raise ValueError("Сначала создайте шаблон письма")
+    template, mailbox = delivery_template_for_direction(session, direction), _default_mailbox(session)
     if not mailbox: raise ValueError("Почтовый ящик недоступен")
-    command_key = hashlib.sha256(f"sheet-action-v1:{config.id}:{direction.id}:{company_id}".encode()).hexdigest()
+    proposal_template = ensure_proposal_template(session, direction)
+    command_key = hashlib.sha256(
+        f"sheet-action-v2:{config.id}:{direction.id}:{company_id}:{proposal_template.version}".encode()
+    ).hexdigest()
     draft = session.scalar(select(SheetPersonalizationDraft).where(SheetPersonalizationDraft.command_key == command_key).with_for_update())
     try:
         if action == "prepare":
@@ -83,15 +85,13 @@ def execute_sheet_action(session: Session, company_id: str, action: str, setting
                     session.rollback()
                     draft = session.scalar(select(SheetPersonalizationDraft).where(SheetPersonalizationDraft.command_key == command_key))
             _write(worksheet, row, status_column, preview_column, "Подготовка...")
-            preview = prepare_personalization(session, company, template, settings, account=mailbox)
-            draft.request_key, draft.subject = str(preview["request_key"]), str(preview["subject"])
-            draft.html_body, draft.text_body, draft.facts = str(preview["html_body"]), str(preview["text_body"]), list(preview.get("facts") or [])
-            draft.status, draft.error = "ready", None
-            session.commit()
+            draft = prepare_proposal_draft(
+                session, company, settings, mailbox=mailbox, config=config, command_key=command_key,
+            )
             preview_url = f"{settings.public_base_url.rstrip('/')}/?company={company.id}&draft={draft.id}#companies"
             _write(worksheet, row, status_column, preview_column, "КП подготовлено", preview_url)
             return {"status": "КП подготовлено", "preview_url": preview_url, "duplicate": False}
-        if not draft or draft.status != "ready": raise ValueError("Сначала подготовьте КП")
+        if not draft or draft.status not in {"ready", "sent"}: raise ValueError("Сначала подготовьте КП")
         already_sent = bool(draft.delivery_id)
         delivery = send_sheet_draft(session, draft.id, settings)
         if delivery.status == "queued":
@@ -99,6 +99,7 @@ def execute_sheet_action(session: Session, company_id: str, action: str, setting
             session.refresh(delivery)
         if delivery.status != "sent":
             raise ValueError(delivery.error or "Почтовый ящик недоступен")
+        finalize_proposal_delivery(session, draft, delivery)
         preview_url = f"{settings.public_base_url.rstrip('/')}/?company={company.id}&draft={draft.id}#companies"
         _write(worksheet, row, status_column, preview_column, "Отправлено", preview_url)
         return {"status": "Отправлено", "message_id": delivery.message_id, "duplicate": already_sent}

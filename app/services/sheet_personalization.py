@@ -13,7 +13,7 @@ from app.models import (
     MailAccount, SheetPersonalizationDraft,
 )
 from app.services.google_sheets import _column_letter, _normalized, _retry, discover_schema, worksheet_from_config
-from app.services.personalized import prepare_personalization, send_personalized
+from app.services.proposals import delivery_template_for_direction, ensure_proposal_template, prepare_proposal_draft, send_proposal_draft
 from app.services.user_errors import human_error
 
 
@@ -54,7 +54,7 @@ def _sheet_status(draft: SheetPersonalizationDraft, delivery: EmailDelivery | No
             "opened": "Открыто", "clicked": "Перешли по ссылке", "replied": "Получен ответ",
             "bounced": "Не доставлено", "unsubscribed": "Отписались", "send_error": "Ошибка",
         }.get(delivery.status, "Ошибка")
-    return {"preparing": "Подготовка...", "ready": "Готово к отправке", "error": "Ошибка"}.get(draft.status, "Ошибка")
+    return {"preparing": "Подготовка...", "ready": "Готово к отправке", "sent": "Отправлено", "error": "Ошибка"}.get(draft.status, "Ошибка")
 
 
 def process_sheet_personalization_triggers(
@@ -85,9 +85,12 @@ def process_sheet_personalization_triggers(
         linked = company and session.scalar(select(CompanyDirection.company_id).where(
             CompanyDirection.company_id == company.id, CompanyDirection.direction_id == direction.id,
         ))
-        template = _default_template(session, direction)
+        template = delivery_template_for_direction(session, direction)
         mailbox = _default_mailbox(session)
-        command_key = hashlib.sha256(f"{config.id}:{direction.id}:{company_id}:{SHEET_PERSONALIZATION_COMMAND}".encode()).hexdigest()
+        proposal_template = ensure_proposal_template(session, direction)
+        command_key = hashlib.sha256(
+            f"sheet-command-v2:{config.id}:{direction.id}:{company_id}:{proposal_template.version}:{SHEET_PERSONALIZATION_COMMAND}".encode()
+        ).hexdigest()
         draft = session.scalar(select(SheetPersonalizationDraft).where(SheetPersonalizationDraft.command_key == command_key))
         if not company or not linked or not template:
             message = "Компания не найдена по LeadFlow ID." if not company or not linked else "Сначала создайте шаблон письма."
@@ -111,14 +114,9 @@ def process_sheet_personalization_triggers(
             preparing_cell = f"{_column_letter(status_column)}{row_number}"
             _retry(lambda: worksheet.update(range_name=preparing_cell, values=[["Подготовка..."]]))
             try:
-                preview = prepare_personalization(session, company, template, settings, account=mailbox)
-                draft.request_key = str(preview["request_key"])
-                draft.subject = str(preview["subject"])
-                draft.html_body = str(preview["html_body"])
-                draft.text_body = str(preview["text_body"])
-                draft.facts = list(preview.get("facts") or [])
-                draft.status, draft.error = "ready", None
-                session.commit()
+                draft = prepare_proposal_draft(
+                    session, company, settings, mailbox=mailbox, config=config, command_key=command_key,
+                )
                 counters["prepared"] += 1
             except Exception as exc:
                 session.rollback()
@@ -149,31 +147,28 @@ def send_sheet_draft(
     draft = session.scalar(select(SheetPersonalizationDraft).where(
         SheetPersonalizationDraft.id == draft_id,
     ).with_for_update())
-    if not draft or draft.status != "ready" or not draft.request_key:
+    if not draft or draft.status not in {"ready", "sent"}:
         raise ValueError("Персональное письмо ещё не готово.")
     if draft.delivery_id:
         delivery = session.get(EmailDelivery, draft.delivery_id)
         if delivery:
             return delivery
-    company = session.get(Company, draft.company_id)
-    template = session.get(EmailTemplate, draft.template_id)
-    mailbox = session.get(MailAccount, draft.mailbox_id) if draft.mailbox_id else None
-    if not company or not template or not mailbox:
-        raise ValueError("Почтовый ящик или шаблон не настроен.")
-    delivery = send_personalized(
-        session, company, mailbox, template, draft.request_key, settings,
-        overrides=overrides or {"subject": draft.subject, "html_body": draft.html_body, "text_body": draft.text_body},
-    )
-    draft.delivery_id = delivery.id
-    session.commit()
-    return delivery
+    if overrides:
+        # Compatibility for the old endpoint: only plain draft fields are accepted by new APIs.
+        draft.subject = overrides.get("subject") or draft.subject
+    return send_proposal_draft(session, draft, settings)
 
 
 def serialize_draft(draft: SheetPersonalizationDraft) -> dict[str, Any]:
     return {
         "id": draft.id, "company_id": draft.company_id, "template_id": draft.template_id,
         "mailbox_id": draft.mailbox_id, "status": draft.status, "subject": draft.subject,
-        "html_body": draft.html_body, "text_body": draft.text_body, "facts": draft.facts,
+        "direction_id": draft.direction_id, "proposal_template_id": draft.proposal_template_id,
+        "template_version": draft.template_version, "greeting": draft.greeting, "main_body": draft.main_body,
+        "ai_personalization": draft.ai_personalization, "extra_block": draft.extra_block, "cta": draft.cta,
+        "signature": draft.signature, "ai_evidence": draft.ai_evidence,
+        "html_body": draft.html_body, "text_body": draft.text_body, "html_snapshot": draft.html_snapshot,
+        "facts": draft.facts,
         "request_key": draft.request_key, "delivery_id": draft.delivery_id,
-        "error": draft.error, "created_at": draft.created_at,
+        "error": draft.error, "created_at": draft.created_at, "updated_at": draft.updated_at,
     }
