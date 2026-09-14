@@ -322,7 +322,7 @@ def prepare_proposal_draft(
             company_id=company.id, operation="email_personalization", content_hash=content_hash,
             missing_fields=[business_template.id], prompt_version=PROPOSAL_PROMPT_VERSION,
             instructions=PROPOSAL_AI_PROMPT, input_text=prompt, response_model=ProposalAIResult,
-            schema=PROPOSAL_AI_SCHEMA, max_output_tokens=700, use_cache=not regenerate, force=regenerate,
+            schema=PROPOSAL_AI_SCHEMA, max_output_tokens=900, use_cache=not regenerate, force=regenerate,
         )
         ai_result = generated.data
         request_key = generated.request_key
