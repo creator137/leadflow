@@ -15,7 +15,7 @@ from app.models import (
 )
 from app.services.proposals import (
     ProposalAIResult, _validated_evidence, default_copy, ensure_proposal_template,
-    finalize_proposal_delivery, prepare_proposal_draft, render_proposal, send_proposal_draft,
+    ensure_all_proposal_templates, finalize_proposal_delivery, prepare_proposal_draft, render_proposal, send_proposal_draft,
     update_proposal_draft,
 )
 from app.services.secrets import encrypt_secret
@@ -52,6 +52,19 @@ def test_each_direction_gets_distinct_business_copy() -> None:
     assert "банкет" in restaurant.main_body
     assert "welcome" in hotel.main_body
     assert "спикер" in event.main_body
+
+
+def test_expected_direction_templates_are_seeded_paused_without_jobs() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        ensure_all_proposal_templates(session)
+        directions = list(session.scalars(select(Direction)))
+        assert {x.name for x in directions} >= {
+            "Рестораны", "Кафе", "Отели", "Event-агентства", "Кейтеринг", "Туроператоры", "Школы",
+        }
+        assert all(not x.active for x in directions)
+        assert session.query(DirectionProposalTemplate).count() == len(directions)
 
 
 def test_ai_json_rejects_html_and_fact_without_evidence() -> None:

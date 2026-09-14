@@ -73,6 +73,7 @@ DEFAULTS: dict[str, TemplateCopy] = {
         "Для школ мы делаем памятные пряники и подарочные наборы к выпускным, праздникам и важным школьным событиям — для учеников, учителей и родителей.\n\nМожно использовать символику школы, имена, индивидуальные надписи и рисунки. Работаем с небольшими и крупными партиями, доставляем по России.",
     ),
 }
+EXPECTED_DIRECTIONS = ("Рестораны", "Кафе", "Отели", "Event-агентства", "Кейтеринг", "Туроператоры", "Школы")
 
 
 def default_copy(direction_name: str) -> TemplateCopy:
@@ -103,6 +104,19 @@ def ensure_proposal_template(session: Session, direction: Direction) -> Directio
 
 def ensure_all_proposal_templates(session: Session) -> None:
     changed = False
+    existing_names = {name.casefold() for name in session.scalars(select(Direction.name).where(Direction.archived_at.is_(None)))}
+    existing_slugs = set(session.scalars(select(Direction.slug)))
+    for name in EXPECTED_DIRECTIONS:
+        if name.casefold() in existing_names:
+            continue
+        base_slug = re.sub(r"[^a-zа-яё0-9]+", "-", name.casefold(), flags=re.I).strip("-")
+        slug, suffix = base_slug, 2
+        while slug in existing_slugs:
+            slug, suffix = f"{base_slug}-{suffix}", suffix + 1
+        session.add(Direction(name=name, slug=slug, sheet_tab=name, active=False, limit_new=50))
+        existing_names.add(name.casefold()); existing_slugs.add(slug); changed = True
+    if changed:
+        session.flush()
     for direction in session.scalars(select(Direction).where(Direction.archived_at.is_(None))):
         if not session.scalar(select(DirectionProposalTemplate.id).where(DirectionProposalTemplate.direction_id == direction.id)):
             ensure_proposal_template(session, direction)
