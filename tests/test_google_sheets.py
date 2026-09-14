@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.db import Base
 from app.models import Company, CompanyDirection, CompanyFieldProvenance, Direction, GoogleSheetsConfig, SheetRowMapping
 from app.services.google_sheets import (
-    BUSINESS_COLUMNS, COLUMNS, HEADERS, GoogleSheetsSyncService, _retry,
+    BUSINESS_COLUMNS, COLUMNS, HEADERS, SHARED_SHEET_HEADERS, GoogleSheetsSyncService, _retry,
     discover_schema, standardize_business_columns,
 )
 from app.services.provenance import apply_field
@@ -87,6 +87,15 @@ def test_duplicate_headers_are_mapped_by_position() -> None:
     assert COLUMNS[10][1] == "decision_maker_email"
     assert COLUMNS[8][1] == "company_phone"
     assert COLUMNS[11][1] == "decision_maker_phone"
+    assert SHARED_SHEET_HEADERS[0] == "Сайт"
+    assert SHARED_SHEET_HEADERS[12:] == (
+        "Статус почтовых отправлений",
+        "Действие", "Результат", "Задача",
+        "Действие", "Результат", "Задача",
+        "Действие", "Результат", "Задача",
+        "ИТОГ", "Комментарии", "LeadFlow ID", "ИНН",
+        "Статус персонального КП", "Предпросмотр КП",
+    )
 
 
 def test_realistic_second_row_schema_and_email_status() -> None:
@@ -109,12 +118,15 @@ def test_sheet_identity_update_and_manual_preservation() -> None:
         first = service.sync_direction(direction, worksheet=worksheet)
         assert first == {"imported": 0, "inserted": 1, "updated": 0, "total": 1}
         assert len(worksheet.rows) == 2
-        assert worksheet.rows[1][14] == company.id
+        id_column = worksheet.rows[0].index("LeadFlow ID")
+        assert worksheet.rows[1][id_column] == company.id
         assert worksheet.rows[0][0] == "Сайт"
 
         worksheet.rows[1][9] = "Тестовый Менеджер"
-        worksheet.rows[1][12] = "Связаться позже"
-        worksheet.rows[1][13] = "Перезвонить"
+        action_column = worksheet.rows[0].index("Действие")
+        result_column = worksheet.rows[0].index("Результат")
+        worksheet.rows[1][action_column] = "Связаться позже"
+        worksheet.rows[1][result_column] = "Перезвонить"
         second = service.sync_direction(direction, worksheet=worksheet)
         assert second["inserted"] == 0 and second["updated"] == 1
         assert len(worksheet.rows) == 2
@@ -146,7 +158,8 @@ def test_row_movement_is_found_by_leadflow_id() -> None:
         company.company_phone = "+7 000 000-00-00"
         result = service.sync_direction(direction, worksheet=worksheet)
         assert result["inserted"] == 0 and result["updated"] == 1
-        matches = [row for row in worksheet.rows if len(row) > 14 and row[14] == company.id]
+        id_column = worksheet.rows[0].index("LeadFlow ID")
+        matches = [row for row in worksheet.rows if len(row) > id_column and row[id_column] == company.id]
         assert len(matches) == 1 and matches[0][8] == "+7 000 000-00-00"  # unchanged system value updates after row movement
 
 
@@ -163,7 +176,8 @@ def test_ai_enrichment_updates_same_sheet_row_only_when_empty() -> None:
                            source_url="https://example.test/offices", confidence=0.8)
         result = service.sync_direction(direction, worksheet=worksheet)
         assert result["inserted"] == 0 and result["updated"] == 1
-        assert len([row for row in worksheet.rows if len(row) > 14 and row[14] == company.id]) == 1
+        id_column = worksheet.rows[0].index("LeadFlow ID")
+        assert len([row for row in worksheet.rows if len(row) > id_column and row[id_column] == company.id]) == 1
         assert worksheet.rows[1][5] == "4"
         worksheet.rows[1][5] = "7"
         service.sync_direction(direction, worksheet=worksheet)

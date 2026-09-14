@@ -65,7 +65,8 @@ def test_sheet_command_prepares_once_by_stable_leadflow_id(monkeypatch) -> None:
         _mailing_setup(session, direction.id)
         worksheet = FakeWorksheet()
         GoogleSheetsSyncService(session, config).sync_direction(direction, worksheet=worksheet)
-        worksheet.rows[1][12] = "Подготовить персональное КП"
+        action_column = worksheet.rows[0].index("Действие")
+        worksheet.rows[1][action_column] = "Подготовить персональное КП"
         calls = 0
 
         def fake_prepare(*_args, **_kwargs):

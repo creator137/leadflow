@@ -44,6 +44,15 @@ COLUMNS: tuple[tuple[str, str], ...] = (
 )
 BUSINESS_COLUMNS = COLUMNS[:12]
 HEADERS = [header for header, _ in COLUMNS]
+SHARED_SHEET_HEADERS: tuple[str, ...] = (
+    *(header for header, _ in BUSINESS_COLUMNS),
+    "Статус почтовых отправлений",
+    "Действие", "Результат", "Задача",
+    "Действие", "Результат", "Задача",
+    "Действие", "Результат", "Задача",
+    "ИТОГ", "Комментарии",
+    "LeadFlow ID", "ИНН", "Статус персонального КП", "Предпросмотр КП",
+)
 MANUAL_FIELDS = {
     "communication_started_at", "region", "city", "branches_count", "address", "company_email",
     "company_phone", "decision_maker_name", "decision_maker_email", "decision_maker_phone", "website", "inn", "action", "result",
@@ -168,7 +177,7 @@ def _move_column_left(worksheet: Any, source: int, destination: int) -> None:
 
 
 def standardize_business_columns(worksheet: Any, rows: list[list[str]]) -> list[list[str]]:
-    """Keep one Website column at A and align the safe business area A:L.
+    """Keep one Website column at A and align the shared sheet layout A:AB.
 
     Moving/inserting whole columns through the Sheets API preserves formulas,
     formatting and manual workflow data that live to the right of this area.
@@ -250,6 +259,29 @@ def standardize_business_columns(worksheet: Any, rows: list[list[str]]) -> list[
             header[column - 1] = title
     if header_updates:
         _retry(lambda: worksheet.batch_update(header_updates))
+
+    # Keep every direction tab visually identical. Repeated workflow columns
+    # are matched from left to right, while whole-column moves preserve manual
+    # values, formulas, formatting and stable LeadFlow IDs.
+    for destination, title in enumerate(SHARED_SHEET_HEADERS[12:], start=13):
+        wanted = _normalized(title)
+        source = next(
+            (index for index in range(destination, len(header) + 1) if _normalized(header[index - 1]) == wanted),
+            None,
+        )
+        if source is None:
+            _retry(lambda destination=destination: worksheet.insert_cols([[""]], col=destination))
+            header.insert(destination - 1, "")
+            cell = f"{_column_letter(destination)}{schema.header_row}"
+            _retry(lambda cell=cell, title=title: worksheet.update(range_name=cell, values=[[title]]))
+            header[destination - 1] = title
+        elif source > destination:
+            _move_column_left(worksheet, source, destination)
+            header.insert(destination - 1, header.pop(source - 1))
+        if header[destination - 1] != title:
+            cell = f"{_column_letter(destination)}{schema.header_row}"
+            _retry(lambda cell=cell, title=title: worksheet.update(range_name=cell, values=[[title]]))
+            header[destination - 1] = title
     return _retry(worksheet.get_all_values)
 
 
@@ -275,8 +307,8 @@ def worksheet_from_config(config: GoogleSheetsConfig, sheet_tab: str):
     try:
         return spreadsheet.worksheet(sheet_tab)
     except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=sheet_tab, rows=1000, cols=len(COLUMNS))
-        worksheet.update(range_name=f"A1:{_column_letter(len(COLUMNS))}1", values=[HEADERS])
+        worksheet = spreadsheet.add_worksheet(title=sheet_tab, rows=1000, cols=len(SHARED_SHEET_HEADERS))
+        worksheet.update(range_name=f"A1:{_column_letter(len(SHARED_SHEET_HEADERS))}1", values=[list(SHARED_SHEET_HEADERS)])
         return worksheet
 
 
@@ -298,8 +330,8 @@ class GoogleSheetsSyncService:
         worksheet = worksheet or _retry(lambda: worksheet_from_config(self.config, direction.sheet_tab))
         rows = _retry(worksheet.get_all_values)
         if not rows or not any(any(cell.strip() for cell in row) for row in rows):
-            _retry(lambda: worksheet.update(range_name=f"A1:{_column_letter(len(COLUMNS))}1", values=[HEADERS]))
-            rows = [HEADERS]
+            _retry(lambda: worksheet.update(range_name=f"A1:{_column_letter(len(SHARED_SHEET_HEADERS))}1", values=[list(SHARED_SHEET_HEADERS)]))
+            rows = [list(SHARED_SHEET_HEADERS)]
         rows = standardize_business_columns(worksheet, rows)
         schema = discover_schema(rows)
         header = rows[schema.header_row - 1]
