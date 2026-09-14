@@ -41,9 +41,18 @@ def run() -> None:
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         context = browser.new_context(http_credentials={"username": auth[0], "password": auth[1]}, locale="ru-RU")
-        page = context.new_page(); page.goto("http://127.0.0.1:8000/#analytics", wait_until="networkidle")
-        page.wait_for_selector("#analyticsBody .metric-card")
-        ui_cards = {card.locator(".metric-label").inner_text(): int(card.locator(".metric-value").inner_text()) for card in page.locator("#analyticsBody .metric-card").all()}
+        page = context.new_page()
+        page.goto("http://127.0.0.1:8000/#analytics", wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_selector("#analyticsBody .metric-card", timeout=60_000)
+        integer_labels = {
+            "Новых уникальных", "Дубликатов", "Компаний с сайтом", "Компаний с email",
+            "Компаний с телефоном", "Отправлено писем", "Ответов", "Не доставлено", "Отписок",
+        }
+        ui_cards = {
+            card.locator(".metric-label").inner_text(): int(card.locator(".metric-value").inner_text())
+            for card in page.locator("#analyticsBody .metric-card").all()
+            if card.locator(".metric-label").inner_text() in integer_labels
+        }
         ui = {"new": ui_cards["Новых уникальных"], "duplicates": ui_cards["Дубликатов"],
               "with_website": ui_cards["Компаний с сайтом"], "with_email": ui_cards["Компаний с email"],
               "with_phone": ui_cards["Компаний с телефоном"], "sent": ui_cards["Отправлено писем"],
