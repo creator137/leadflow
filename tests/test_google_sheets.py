@@ -287,6 +287,24 @@ def test_legacy_second_row_header_is_aligned_without_touching_title_row() -> Non
     assert rows[1][:12] == [title for title, _ in BUSINESS_COLUMNS]
 
 
+def test_interrupted_alignment_reuses_blank_and_removes_empty_contact_duplicate() -> None:
+    worksheet = FakeWorksheet()
+    worksheet.rows = [
+        [],
+        ["Сайт", "Начало общения / Дата", "Наименование клиента", "Область", "Город", "",
+         "Адрес", "Почта", "Почта", "Телефон", "ЛПР", "Почта", "Телефон", "Действие"],
+        ["https://example.test", "", "Компания", "", "Москва", "", "Адрес", "", "info@example.test",
+         "+70000000000", "Иван", "director@example.test", "+71111111111", ""],
+    ]
+
+    rows = standardize_business_columns(worksheet, worksheet.get_all_values())
+
+    assert rows[1][:12] == [title for title, _ in BUSINESS_COLUMNS]
+    assert rows[2][0] == "https://example.test"
+    assert rows[2][7] == "info@example.test"
+    assert rows[2][8] == "+70000000000"
+
+
 def test_manual_value_can_be_changed_again_after_snapshot() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

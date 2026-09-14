@@ -198,13 +198,43 @@ def standardize_business_columns(worksheet: Any, rows: list[list[str]]) -> list[
                     row.pop(column - 1)
         header = rows[schema.header_row - 1][:]
 
+    # A previously interrupted alignment can leave a titled but fully empty
+    # contact column. Remove only such empty extras; populated manual columns
+    # are never deleted.
+    for contact_header in ("почта", "телефон"):
+        columns = [index for index, value in enumerate(header, 1) if _normalized(value) == contact_header]
+        while len(columns) > 2:
+            removable = next((
+                column for column in columns
+                if not any(len(row) >= column and row[column - 1].strip() for row in rows[schema.data_row - 1:])
+            ), None)
+            if removable is None:
+                break
+            _retry(lambda removable=removable: worksheet.delete_columns(removable))
+            for row in rows:
+                if len(row) >= removable:
+                    row.pop(removable - 1)
+            header = rows[schema.header_row - 1][:]
+            columns = [index for index, value in enumerate(header, 1) if _normalized(value) == contact_header]
+
     for destination, (title, field_name) in enumerate(BUSINESS_COLUMNS, start=1):
         current_schema = discover_schema([header])
         source = current_schema.fields.get(field_name)
         if source is None:
-            values = [[""] for _ in range(schema.header_row - 1)] + [[title]]
-            _retry(lambda values=values, destination=destination: worksheet.insert_cols(values, col=destination))
-            header.insert(destination - 1, title)
+            empty_destination = (
+                destination <= len(header)
+                and not header[destination - 1].strip()
+                and not any(
+                    len(row) >= destination and row[destination - 1].strip()
+                    for row in rows[schema.data_row - 1:]
+                )
+            )
+            if not empty_destination:
+                _retry(lambda destination=destination: worksheet.insert_cols([[""]], col=destination))
+                header.insert(destination - 1, "")
+            cell = f"{_column_letter(destination)}{schema.header_row}"
+            _retry(lambda cell=cell, title=title: worksheet.update(range_name=cell, values=[[title]]))
+            header[destination - 1] = title
         elif source > destination:
             _move_column_left(worksheet, source, destination)
             header.insert(destination - 1, header.pop(source - 1))
