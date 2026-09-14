@@ -30,6 +30,7 @@ from app.models import (
 )
 from app.services.provenance import apply_field
 from app.services.secrets import decrypt_secret, encrypt_secret
+from app.services.user_errors import STATUS_RU
 
 # New worksheets start with the website address. The first twelve columns are
 # the shared business area; manual workflow columns may safely follow it.
@@ -439,6 +440,7 @@ class GoogleSheetsSyncService:
                     synced_values[field_name] = value
             if schema.email_status_column:
                 latest = self.session.scalar(select(EmailDelivery.status).where(EmailDelivery.company_id == company.id, EmailDelivery.direction_id == direction.id).order_by(EmailDelivery.created_at.desc()).limit(1)) or ""
+                latest = STATUS_RU.get(latest, latest)
                 current = existing[schema.email_status_column - 1].strip() if len(existing) >= schema.email_status_column else ""
                 if latest != current: updates.append({"range": f"{_column_letter(schema.email_status_column)}{row_number}", "values": [[latest]]})
             if mapping is None:

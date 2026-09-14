@@ -123,6 +123,17 @@ def is_suppressed(session: Session, recipient: str) -> bool:
     return bool(session.scalar(select(Suppression.email).where(Suppression.email == normalize_email(recipient), Suppression.active.is_(True))))
 
 
+def mailbox_daily_limit_reached(session: Session, account: MailAccount) -> bool:
+    today = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
+    used = session.scalar(select(func.count()).select_from(EmailDelivery).where(
+        EmailDelivery.mailbox_id == account.id, EmailDelivery.sent_at >= today,
+    )) or 0
+    pending = session.scalar(select(func.count()).select_from(EmailDelivery).where(
+        EmailDelivery.mailbox_id == account.id, EmailDelivery.status.in_(["queued", "sending"]),
+    )) or 0
+    return used + pending >= account.daily_limit
+
+
 def build_delivery(session: Session, company: Company, account: MailAccount, template: EmailTemplate, settings: Settings, *, campaign: Campaign | None = None, direction_id: str | None = None, send_mode: str = "manual", overrides: dict[str, str | None] | None = None, extra: dict[str, str] | None = None, recipient_override: str | None = None, idempotency_key: str | None = None) -> EmailDelivery:
     if idempotency_key:
         existing = session.scalar(select(EmailDelivery).where(EmailDelivery.idempotency_key == idempotency_key))
@@ -131,6 +142,7 @@ def build_delivery(session: Session, company: Company, account: MailAccount, tem
     recipient = normalize_email(recipient_override or company.decision_maker_email or company.company_email or company.email or "")
     if not recipient: raise ValueError("Company has no recipient email")
     if is_suppressed(session, recipient) or company.manually_blocked: raise ValueError("Recipient is suppressed")
+    if mailbox_daily_limit_reached(session, account): raise ValueError("Mailbox daily limit reached")
     if campaign and session.scalar(select(EmailDelivery.id).where(EmailDelivery.campaign_id == campaign.id, EmailDelivery.company_id == company.id, EmailDelivery.recipient_email == recipient)):
         raise ValueError("This campaign was already sent or queued for the recipient")
     if campaign and campaign.cooldown_days:

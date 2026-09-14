@@ -17,6 +17,8 @@ def human_error(exc: Exception | str) -> str:
         return "У компании не указан email."
     if "cooldown" in text or "already sent" in text:
         return "Этому получателю недавно уже отправляли письмо."
+    if "mailbox daily limit" in text or "daily limit" in text:
+        return "Дневной лимит писем с этого адреса достигнут."
     if any(word in text for word in ("google", "spreadsheet", "worksheet", "gspread", "403")):
         return "Нет доступа к Google Таблице. Проверьте доступ для сервисного адреса."
     if any(word in text for word in ("smtpauthentication", "authentication failed", "invalid credentials")):

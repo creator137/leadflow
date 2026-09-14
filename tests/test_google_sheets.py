@@ -2,7 +2,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.models import Company, CompanyDirection, CompanyFieldProvenance, Direction, GoogleSheetsConfig, SheetRowMapping
+from app.models import Company, CompanyDirection, CompanyFieldProvenance, Direction, EmailDelivery, GoogleSheetsConfig, SheetRowMapping
 from app.services.google_sheets import (
     BUSINESS_COLUMNS, COLUMNS, HEADERS, SHARED_SHEET_HEADERS, GoogleSheetsSyncService, _retry,
     discover_schema, standardize_business_columns,
@@ -182,6 +182,23 @@ def test_ai_enrichment_updates_same_sheet_row_only_when_empty() -> None:
         worksheet.rows[1][5] = "7"
         service.sync_direction(direction, worksheet=worksheet)
         assert company.branches_count == 7 and worksheet.rows[1][5] == "7"
+
+
+def test_email_status_is_written_to_sheet_in_russian() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction, company, config = setup_company(session)
+        session.add(EmailDelivery(
+            company_id=company.id, direction_id=direction.id, mailbox_id="mailbox", template_id="template",
+            recipient_email="info@abc.ru", subject="Тест", html_body="<p>Тест</p>", text_body="Тест",
+            status="replied", tracking_token="tracking", unsubscribe_token="unsubscribe",
+        ))
+        session.commit()
+        worksheet = FakeWorksheet()
+        GoogleSheetsSyncService(session, config).sync_direction(direction, worksheet=worksheet)
+        status_column = worksheet.rows[0].index("Статус почтовых отправлений")
+        assert worksheet.rows[1][status_column] == "Получен ответ"
 
 
 def test_duplicate_leadflow_id_is_rejected() -> None:

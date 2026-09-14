@@ -66,6 +66,14 @@ def test_suppression_checked_before_queue(db: Session) -> None:
         build_delivery(db, company, account, template, Settings())
 
 
+def test_daily_mailbox_limit_applies_to_one_off_sends(db: Session) -> None:
+    _, company, account, template = setup(db)
+    account.daily_limit = 1
+    build_delivery(db, company, account, template, Settings(), recipient_override="first@example.test")
+    with pytest.raises(ValueError, match="daily limit"):
+        build_delivery(db, company, account, template, Settings(), recipient_override="second@example.test")
+
+
 def test_atomic_claim_and_send_updates_company(db: Session, monkeypatch) -> None:
     _, company, account, template = setup(db)
     delivery = build_delivery(db, company, account, template, Settings(public_base_url="https://lead.test"))
