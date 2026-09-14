@@ -60,6 +60,22 @@ class FreeSearchProvider:
             if len(found) >= limit:
                 return found[:limit]
             try:
+                response = client.get("https://ru.wikipedia.org/w/api.php", params={
+                    "action": "query", "list": "search", "srsearch": phrase,
+                    "format": "json", "utf8": "1", "srlimit": limit,
+                })
+                response.raise_for_status()
+                for item in response.json().get("query", {}).get("search", []):
+                    page_id = item.get("pageid")
+                    if page_id:
+                        url = f"https://ru.wikipedia.org/?curid={page_id}"
+                        if url not in found:
+                            found.append(url)
+            except (httpx.HTTPError, ValueError):
+                pass
+            if len(found) >= limit:
+                return found[:limit]
+            try:
                 response = client.get(f"https://www.bing.com/search?format=rss&q={query}")
                 response.raise_for_status()
                 for link in BeautifulSoup(response.text, "html.parser").select("item > link"):
