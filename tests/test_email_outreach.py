@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, validate_production_secrets
 from app.db import Base
-from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailTemplate, InboundReply, MailAccount, Suppression, TrackedLink
+from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailEvent, EmailTemplate, InboundReply, MailAccount, Suppression, TrackedLink
 from app.schemas import MailAccountRead
 from app.services.imap_monitor import classify_bounce, process_inbound
 from app.services.mailing import build_delivery, claim_delivery, diagnose_smtp, queue_campaign, send_claimed_delivery
@@ -24,8 +24,9 @@ def setup(session: Session):
     direction = Direction(name="Кафе", slug="кафе", sheet_tab="Кафе", limit_new=10)
     company = Company(source="two_gis", company_name="Кафе Тест", city="Москва", email="hello@example.test", company_email="hello@example.test", normalized_name="кафе тест", raw_data={})
     account = MailAccount(name="Тест", from_email="sender@example.test", from_name="Мария", smtp_host="smtp.example.test", smtp_port=465, smtp_login="sender", smtp_password_encrypted=encrypt_secret("secret"), smtp_security="ssl", imap_host="imap.example.test", imap_port=993, imap_login="sender", imap_password_encrypted=encrypt_secret("secret"), imap_security="ssl", daily_limit=5)
-    template = EmailTemplate(name="Общий", direction_id=None, subject_template="Для {{company_name}}", html_template='<p>Здравствуйте</p><a href="https://example.org/a">Подробнее</a>', text_template="Здравствуйте, {{company_name}}")
-    session.add_all([direction, company, account, template]); session.flush()
+    session.add_all([direction, company, account]); session.flush()
+    template = EmailTemplate(name="Кафе", direction_id=direction.id, subject_template="Для {{company_name}}", html_template='<p>Здравствуйте, {{company_name}}</p><a href="https://example.org/a">Подробнее</a>', text_template="Здравствуйте, {{company_name}}")
+    session.add(template); session.flush()
     session.add(CompanyDirection(company_id=company.id, direction_id=direction.id)); session.commit()
     return direction, company, account, template
 
@@ -85,6 +86,27 @@ def test_atomic_claim_and_send_updates_company(db: Session, monkeypatch) -> None
     db.refresh(company); db.refresh(delivery)
     assert delivery.message_id and delivery.sent_at and delivery.attempt_count == 1
     assert company.action == "Отправлено предложение" and company.communication_started_at
+    assert [row.event_type for row in db.scalars(select(EmailEvent).order_by(EmailEvent.occurred_at))] == ["queued", "sending", "sent"]
+
+
+def test_automatic_campaign_uses_matching_direction_template(db: Session) -> None:
+    direction, company, account, matching = setup(db)
+    wrong = EmailTemplate(
+        name="Отели", direction_id=None, subject_template="Неверный шаблон",
+        html_template="<p>Неверный шаблон</p>", text_template="Неверный шаблон",
+    )
+    db.add(wrong); db.flush()
+    campaign = Campaign(
+        name="Автоматическая рассылка", direction_id=direction.id, mailbox_id=account.id,
+        template_id=wrong.id, daily_limit=1, run_limit=1, sending_interval_seconds=10,
+        cooldown_days=0, status="running", active=True,
+    )
+    db.add(campaign); db.commit()
+    assert queue_campaign(db, campaign, Settings(public_base_url="https://lead.test"))["queued"] == 1
+    delivery = db.scalar(select(EmailDelivery).where(EmailDelivery.company_id == company.id))
+    assert delivery.template_id == matching.id
+    assert company.company_name in delivery.subject
+    assert company.company_name in delivery.html_body
 
 
 def test_reply_matching_and_uid_idempotency(db: Session) -> None:
@@ -97,6 +119,7 @@ def test_reply_matching_and_uid_idempotency(db: Session) -> None:
     assert process_inbound(db, account, reply.as_bytes(), 42, 7) is False
     db.refresh(delivery); db.refresh(company)
     assert delivery.status == "replied" and db.query(InboundReply).count() == 1
+    assert db.scalar(select(EmailEvent.event_type).where(EmailEvent.delivery_id == delivery.id, EmailEvent.event_type == "replied")) == "replied"
     assert company.action == "Получен ответ"
 
 
@@ -110,6 +133,7 @@ def test_hard_bounce_classification_and_suppression(db: Session) -> None:
     process_inbound(db, account, dsn.as_bytes(), 43, 7)
     db.refresh(delivery)
     assert delivery.status == "bounced" and db.get(Suppression, delivery.recipient_email).reason == "hard_bounce"
+    assert db.scalar(select(EmailEvent.event_type).where(EmailEvent.delivery_id == delivery.id, EmailEvent.event_type == "bounced")) == "bounced"
 
 
 def test_smtp_diagnostics_separate_connection_and_auth(db: Session, monkeypatch) -> None:

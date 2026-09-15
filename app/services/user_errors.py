@@ -36,7 +36,7 @@ STATUS_RU = {
     "queued": "В очереди", "sending": "Отправляется", "sent": "Отправлено",
     "replied": "Получен ответ", "bounced": "Не доставлено", "opened": "Открыто",
     "clicked": "Перешли по ссылке", "unsubscribed": "Отписались",
-    "failed": "Ошибка", "send_error": "Ошибка", "paused": "Приостановлено",
+    "failed": "Ошибка", "send_error": "Ошибка отправки", "paused": "Приостановлено",
     "running": "Работает", "completed": "Завершено", "exhausted": "Завершено",
     "blocked": "Нужна проверка",
 }

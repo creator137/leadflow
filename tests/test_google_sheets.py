@@ -2,10 +2,10 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.models import Company, CompanyDirection, CompanyFieldProvenance, Direction, EmailDelivery, GoogleSheetsConfig, SheetRowMapping
+from app.models import Company, CompanyDirection, CompanyFieldProvenance, Direction, EmailDelivery, EmailTemplate, GoogleSheetsConfig, MailAccount, SheetRowMapping
 from app.services.google_sheets import (
     BUSINESS_COLUMNS, COLUMNS, HEADERS, SHARED_SHEET_HEADERS, GoogleSheetsSyncService, _retry,
-    discover_schema, standardize_business_columns,
+    discover_schema, standardize_business_columns, sync_delivery_tracking_to_sheet,
 )
 from app.services.provenance import apply_field
 
@@ -90,6 +90,7 @@ def test_duplicate_headers_are_mapped_by_position() -> None:
     assert SHARED_SHEET_HEADERS[8] == "Сайт"
     assert SHARED_SHEET_HEADERS[12:] == (
         "Статус почтовых отправлений",
+        "Дата отправки", "Шаблон письма", "Отправитель", "Состояние взаимодействия",
         "Действие", "Результат", "Задача",
         "Действие", "Результат", "Задача",
         "Действие", "Результат", "Задача",
@@ -199,6 +200,53 @@ def test_email_status_is_written_to_sheet_in_russian() -> None:
         GoogleSheetsSyncService(session, config).sync_direction(direction, worksheet=worksheet)
         status_column = worksheet.rows[0].index("Статус почтовых отправлений")
         assert worksheet.rows[1][status_column] == "Получен ответ"
+
+
+def test_all_email_tracking_states_and_metadata_update_same_row() -> None:
+    from datetime import datetime, timezone
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction, company, config = setup_company(session)
+        mailbox = MailAccount(
+            name="Основная почта", from_email="sender@example.test", smtp_host="smtp.example.test",
+            smtp_login="sender", smtp_password_encrypted="unused", imap_host="imap.example.test",
+            imap_login="sender", imap_password_encrypted="unused",
+        )
+        template = EmailTemplate(
+            name="КП — рестораны", direction_id=direction.id, subject_template="Для {{company_name}}",
+            html_template="<p>Текст</p>", text_template="Текст",
+        )
+        session.add_all([mailbox, template]); session.flush()
+        delivery = EmailDelivery(
+            company_id=company.id, direction_id=direction.id, mailbox_id=mailbox.id, template_id=template.id,
+            recipient_email="test@example.test", subject="Тест", html_body="<p>Тест</p>", text_body="Тест",
+            status="sent", sent_at=datetime(2026, 9, 15, 8, 30, tzinfo=timezone.utc),
+            tracking_token="tracking-all", unsubscribe_token="unsubscribe-all",
+        )
+        session.add(delivery); session.commit()
+        worksheet = FakeWorksheet()
+        service = GoogleSheetsSyncService(session, config)
+        service.sync_direction(direction, worksheet=worksheet)
+        id_column = worksheet.rows[0].index("LeadFlow ID")
+        assert len([row for row in worksheet.rows if len(row) > id_column and row[id_column] == company.id]) == 1
+        worksheet.rows[1][9] = "Ручной ЛПР"
+        expected = {
+            "sent": "Отправлено", "send_error": "Ошибка отправки", "bounced": "Не доставлено",
+            "opened": "Открыто", "clicked": "Перешли по ссылке", "replied": "Получен ответ",
+            "unsubscribed": "Отписались",
+        }
+        for status, russian in expected.items():
+            delivery.status = status; session.commit()
+            assert sync_delivery_tracking_to_sheet(session, delivery, worksheet=worksheet)
+            header, row = worksheet.rows[0], worksheet.rows[1]
+            assert row[header.index("Статус почтовых отправлений")] == russian
+            assert row[header.index("Состояние взаимодействия")] == russian
+            assert row[header.index("Дата отправки")].startswith("2026-09-15T08:30")
+            assert row[header.index("Шаблон письма")] == "КП — рестораны"
+            assert row[header.index("Отправитель")] == "Основная почта"
+            assert row[9] == "Ручной ЛПР"
 
 
 def test_duplicate_leadflow_id_is_rejected() -> None:

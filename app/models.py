@@ -400,6 +400,17 @@ class EmailDelivery(Base):
     )
 
 
+class EmailEvent(Base):
+    __tablename__ = "email_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    delivery_id: Mapped[str] = mapped_column(ForeignKey("email_deliveries.id", ondelete="CASCADE"), nullable=False, index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class TrackedLink(Base):
     __tablename__ = "tracked_links"
 

@@ -50,6 +50,7 @@ from app.services.sheet_personalization import _default_mailbox
 from app.services.secrets import decrypt_secret, encrypt_secret
 from app.services.provenance import apply_field
 from app.services.user_errors import human_error
+from app.services.email_events import record_email_event, sync_email_event_to_sheets
 from app.sources.phrase_search import execute_phrase_search
 
 app = FastAPI(title="LeadFlow", version="0.1.0")
@@ -905,7 +906,9 @@ def tracking_pixel(token: str, session: Session = Depends(get_db)) -> Response:
         delivery.opened_at = datetime.now(timezone.utc)
         if delivery.status == "sent":
             delivery.status = "opened"
+        record_email_event(session, delivery, "opened")
         session.commit()
+        sync_email_event_to_sheets(session, delivery)
     return Response(PIXEL, media_type="image/gif", headers={"Cache-Control": "no-store"})
 
 
@@ -916,10 +919,15 @@ def tracking_click(token: str, session: Session = Depends(get_db)) -> RedirectRe
         raise HTTPException(404, "Link not found")
     delivery = session.get(EmailDelivery, link.delivery_id)
     if delivery:
+        first_click = delivery.clicked_at is None
         delivery.clicked_at = delivery.clicked_at or datetime.now(timezone.utc)
         if delivery.status in {"sent", "opened"}:
             delivery.status = "clicked"
+        if first_click:
+            record_email_event(session, delivery, "clicked", {"target_url": link.target_url})
         session.commit()
+        if first_click:
+            sync_email_event_to_sheets(session, delivery)
     return RedirectResponse(link.target_url, status_code=302)
 
 
@@ -928,10 +936,15 @@ def unsubscribe(token: str, session: Session = Depends(get_db)) -> str:
     delivery = session.scalar(select(EmailDelivery).where(EmailDelivery.unsubscribe_token == token))
     if not delivery:
         raise HTTPException(404, "Delivery not found")
+    first_unsubscribe = delivery.unsubscribed_at is None
     delivery.status = "unsubscribed"
-    delivery.unsubscribed_at = datetime.now(timezone.utc)
+    delivery.unsubscribed_at = delivery.unsubscribed_at or datetime.now(timezone.utc)
     session.merge(Suppression(email=delivery.recipient_email, reason="unsubscribe", source_delivery_id=delivery.id, active=True))
+    if first_unsubscribe:
+        record_email_event(session, delivery, "unsubscribed")
     session.commit()
+    if first_unsubscribe:
+        sync_email_event_to_sheets(session, delivery)
     return "<h1>Вы отписаны</h1><p>На этот адрес больше не будут отправляться письма.</p>"
 
 

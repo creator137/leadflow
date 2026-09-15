@@ -24,8 +24,10 @@ from app.models import (
     CompanyFieldProvenance,
     Direction,
     EmailDelivery,
+    EmailTemplate,
     GoogleSheetsConfig,
     GoogleSyncRun,
+    MailAccount,
     SheetRowMapping,
 )
 from app.services.provenance import apply_field
@@ -48,6 +50,7 @@ HEADERS = [header for header, _ in COLUMNS]
 SHARED_SHEET_HEADERS: tuple[str, ...] = (
     *(header for header, _ in BUSINESS_COLUMNS),
     "Статус почтовых отправлений",
+    "Дата отправки", "Шаблон письма", "Отправитель", "Состояние взаимодействия",
     "Действие", "Результат", "Задача",
     "Действие", "Результат", "Задача",
     "Действие", "Результат", "Задача",
@@ -90,6 +93,10 @@ class SheetSchema:
     fields: dict[str, int]
     leadflow_id_column: int
     email_status_column: int | None
+    sent_at_column: int | None
+    email_template_column: int | None
+    mailbox_column: int | None
+    interaction_column: int | None
 
 
 def discover_schema(rows: list[list[str]]) -> SheetSchema:
@@ -109,6 +116,7 @@ def discover_schema(rows: list[list[str]]) -> SheetSchema:
     actions: list[int] = []
     results: list[int] = []
     email_status_column = None
+    sent_at_column = email_template_column = mailbox_column = interaction_column = None
     configured_status = _normalized(get_settings().google_sheets_email_status_header or "")
     for index, raw in enumerate(header, start=1):
         value = _normalized(raw)
@@ -130,6 +138,10 @@ def discover_schema(rows: list[list[str]]) -> SheetSchema:
         elif value == "leadflow id": fields.setdefault("id", index)
         if (configured_status and value == configured_status) or ("статус" in value and "почт" in value):
             email_status_column = index
+        if value == "дата отправки": sent_at_column = index
+        elif value == "шаблон письма": email_template_column = index
+        elif value in {"отправитель", "почтовый ящик"}: mailbox_column = index
+        elif value == "состояние взаимодействия": interaction_column = index
     if email_columns: fields["company_email"] = email_columns[0]
     if len(email_columns) > 1: fields["decision_maker_email"] = email_columns[1]
     if phone_columns: fields["company_phone"] = phone_columns[0]
@@ -142,7 +154,23 @@ def discover_schema(rows: list[list[str]]) -> SheetSchema:
     last_business = max((index for index, value in enumerate(header, 1) if value.strip()), default=len(header))
     leadflow_id_column = fields.get("id", last_business + 1)
     fields["id"] = leadflow_id_column
-    return SheetSchema(header_row, header_row + 1, fields, leadflow_id_column, email_status_column)
+    return SheetSchema(
+        header_row, header_row + 1, fields, leadflow_id_column, email_status_column,
+        sent_at_column, email_template_column, mailbox_column, interaction_column,
+    )
+
+
+def _delivery_sheet_values(delivery: EmailDelivery | None, template: EmailTemplate | None, mailbox: MailAccount | None) -> dict[str, str]:
+    if not delivery:
+        return {"status": "", "sent_at": "", "template": "", "mailbox": "", "interaction": ""}
+    status = STATUS_RU.get(delivery.status, delivery.status)
+    return {
+        "status": status,
+        "sent_at": delivery.sent_at.isoformat() if delivery.sent_at else "",
+        "template": template.name if template else "",
+        "mailbox": mailbox.name if mailbox else "",
+        "interaction": status,
+    }
 
 
 def _text(value: Any) -> str:
@@ -365,6 +393,20 @@ class GoogleSheetsSyncService:
             row_by_id[leadflow_id] = row_number
 
         mappings = {m.company_id: m for m in self.session.scalars(select(SheetRowMapping).where(SheetRowMapping.direction_id == direction.id, SheetRowMapping.spreadsheet_id == self.config.spreadsheet_id))}
+        delivery_rows = list(self.session.scalars(select(EmailDelivery).where(
+            EmailDelivery.company_id.in_(by_id.keys()), EmailDelivery.direction_id == direction.id,
+        ).order_by(EmailDelivery.created_at.desc()))) if by_id else []
+        latest_delivery: dict[str, EmailDelivery] = {}
+        for delivery in delivery_rows:
+            latest_delivery.setdefault(delivery.company_id, delivery)
+        template_ids = {delivery.template_id for delivery in latest_delivery.values()}
+        mailbox_ids = {delivery.mailbox_id for delivery in latest_delivery.values()}
+        email_templates = {
+            row.id: row for row in self.session.scalars(select(EmailTemplate).where(EmailTemplate.id.in_(template_ids)))
+        } if template_ids else {}
+        mailboxes = {
+            row.id: row for row in self.session.scalars(select(MailAccount).where(MailAccount.id.in_(mailbox_ids)))
+        } if mailbox_ids else {}
         provenance_rows = self.session.scalars(select(CompanyFieldProvenance).where(
             CompanyFieldProvenance.company_id.in_(by_id.keys()),
             CompanyFieldProvenance.discovery_method == "manual",
@@ -438,11 +480,24 @@ class GoogleSheetsSyncService:
                     updates.append({"range": f"{_column_letter(column)}{row_number}", "values": [[value]]})
                 if field_name != "id":
                     synced_values[field_name] = value
-            if schema.email_status_column:
-                latest = self.session.scalar(select(EmailDelivery.status).where(EmailDelivery.company_id == company.id, EmailDelivery.direction_id == direction.id).order_by(EmailDelivery.created_at.desc()).limit(1)) or ""
-                latest = STATUS_RU.get(latest, latest)
-                current = existing[schema.email_status_column - 1].strip() if len(existing) >= schema.email_status_column else ""
-                if latest != current: updates.append({"range": f"{_column_letter(schema.email_status_column)}{row_number}", "values": [[latest]]})
+            delivery = latest_delivery.get(company.id)
+            tracking = _delivery_sheet_values(
+                delivery,
+                email_templates.get(delivery.template_id) if delivery else None,
+                mailboxes.get(delivery.mailbox_id) if delivery else None,
+            )
+            for column, key in (
+                (schema.email_status_column, "status"),
+                (schema.sent_at_column, "sent_at"),
+                (schema.email_template_column, "template"),
+                (schema.mailbox_column, "mailbox"),
+                (schema.interaction_column, "interaction"),
+            ):
+                if not column:
+                    continue
+                current = existing[column - 1].strip() if len(existing) >= column else ""
+                if tracking[key] != current:
+                    updates.append({"range": f"{_column_letter(column)}{row_number}", "values": [[tracking[key]]]})
             if mapping is None:
                 mapping = SheetRowMapping(company_id=company.id, direction_id=direction.id, spreadsheet_id=self.config.spreadsheet_id, sheet_tab=direction.sheet_tab, sheet_row=row_number, last_synced_values=synced_values)
                 self.session.add(mapping)
@@ -456,6 +511,59 @@ class GoogleSheetsSyncService:
         ))
         self.session.commit()
         return {"imported": imported, "inserted": inserted, "updated": updated, "total": len(companies)}
+
+
+def sync_delivery_tracking_to_sheet(
+    session: Session, delivery: EmailDelivery, *, worksheet: Any = None,
+) -> bool:
+    """Update only system-owned email columns for the mapped Company row."""
+    mapping_query = select(SheetRowMapping).where(SheetRowMapping.company_id == delivery.company_id)
+    if delivery.direction_id:
+        mapping_query = mapping_query.where(SheetRowMapping.direction_id == delivery.direction_id)
+    mapping = session.scalar(mapping_query.order_by(SheetRowMapping.last_synced_at.desc()).limit(1))
+    if not mapping:
+        return False
+    config = session.scalar(select(GoogleSheetsConfig).where(
+        GoogleSheetsConfig.spreadsheet_id == mapping.spreadsheet_id,
+        GoogleSheetsConfig.active.is_(True),
+    ).limit(1))
+    if not config:
+        return False
+    worksheet = worksheet or _retry(lambda: worksheet_from_config(config, mapping.sheet_tab))
+    rows = _retry(worksheet.get_all_values)
+    rows = standardize_business_columns(worksheet, rows)
+    schema = discover_schema(rows)
+    row_number = next((
+        number for number, row in enumerate(rows[schema.data_row - 1:], start=schema.data_row)
+        if len(row) >= schema.leadflow_id_column and row[schema.leadflow_id_column - 1].strip() == delivery.company_id
+    ), None)
+    if row_number is None:
+        raise ValueError("LeadFlow ID компании отсутствует в Google Таблице; обновление статуса остановлено.")
+    latest = session.scalar(select(EmailDelivery).where(
+        EmailDelivery.company_id == delivery.company_id,
+        EmailDelivery.direction_id == mapping.direction_id,
+    ).order_by(EmailDelivery.created_at.desc()).limit(1))
+    if not latest:
+        return False
+    template = session.get(EmailTemplate, latest.template_id)
+    mailbox = session.get(MailAccount, latest.mailbox_id)
+    values = _delivery_sheet_values(latest, template, mailbox)
+    updates = []
+    for column, key in (
+        (schema.email_status_column, "status"),
+        (schema.sent_at_column, "sent_at"),
+        (schema.email_template_column, "template"),
+        (schema.mailbox_column, "mailbox"),
+        (schema.interaction_column, "interaction"),
+    ):
+        if column:
+            updates.append({"range": f"{_column_letter(column)}{row_number}", "values": [[values[key]]]})
+    if updates:
+        _retry(lambda: worksheet.batch_update(updates))
+    mapping.sheet_row = row_number
+    mapping.last_synced_at = datetime.now(timezone.utc)
+    session.commit()
+    return True
 
 
 def sync_companies(session: Session, config: GoogleSheetsConfig) -> dict[str, int]:

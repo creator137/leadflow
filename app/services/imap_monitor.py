@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Company, EmailDelivery, InboundReply, MailAccount, Suppression
 from app.services.mailing import imap_connection, normalize_email, smtp_connection
+from app.services.email_events import record_email_event, sync_email_event_to_sheets
 from app.services.secrets import decrypt_secret
 
 STATUS_RE = re.compile(r"(?:^|\s)([245])\.\d\.\d(?:\s|$)")
@@ -83,14 +84,18 @@ def process_inbound(session: Session, account: MailAccount, raw: bytes, uid: int
     if delivery and bounce_type:
         delivery.bounced_at = datetime.now(timezone.utc)
         delivery.status = "bounced"
+        record_email_event(session, delivery, "bounced", {"reason": bounce_type})
         if bounce_type == "hard_bounce":
             session.merge(Suppression(email=normalize_email(delivery.recipient_email), reason="hard_bounce", source_delivery_id=delivery.id, active=True))
     elif delivery:
         delivery.status, delivery.replied_at = "replied", datetime.now(timezone.utc)
+        record_email_event(session, delivery, "replied")
         company = session.get(Company, delivery.company_id)
         if company:
             company.action, company.result = "Получен ответ", "Есть ответ"
     session.commit()
+    if delivery:
+        sync_email_event_to_sheets(session, delivery)
     forward_to = account.forward_replies_to or manager_email
     if forward_to and delivery and not bounce_type:
         try:

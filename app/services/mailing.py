@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import Campaign, Company, CompanyDirection, EmailDelivery, EmailTemplate, MailAccount, Suppression, TrackedLink
 from app.services.secrets import decrypt_secret
+from app.services.email_events import record_email_event, sync_email_event_to_sheets
 
 HREF_RE = re.compile(r'(<a\b[^>]*?\bhref=["\'])(https?://[^"\']+)(["\'])', re.I)
 template_env = Environment(autoescape=select_autoescape(["html", "xml"]), undefined=StrictUndefined)
@@ -162,12 +163,18 @@ def build_delivery(session: Session, company: Company, account: MailAccount, tem
     )
     session.add(delivery); session.flush()
     delivery.html_body = add_tracking(session, delivery, html, settings)
+    record_email_event(session, delivery, "queued", {"send_mode": send_mode})
     session.commit(); session.refresh(delivery)
     return delivery
 
 
 def queue_campaign(session: Session, campaign: Campaign, settings: Settings) -> dict[str, int]:
     account, template = session.get(MailAccount, campaign.mailbox_id), session.get(EmailTemplate, campaign.template_id)
+    if campaign.direction_id and (not template or template.direction_id != campaign.direction_id):
+        template = session.scalar(select(EmailTemplate).where(
+            EmailTemplate.direction_id == campaign.direction_id,
+            EmailTemplate.active.is_(True),
+        ).order_by(EmailTemplate.created_at).limit(1))
     if not account or not account.active or not template or not template.active: raise ValueError("Campaign mailbox or template is inactive")
     today = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
     used = session.scalar(select(func.count()).select_from(EmailDelivery).where(EmailDelivery.mailbox_id == account.id, EmailDelivery.sent_at >= today)) or 0
@@ -207,6 +214,7 @@ def claim_delivery(session: Session, worker_id: str) -> str | None:
     delivery.attempt_count += 1
     account = session.get(MailAccount, delivery.mailbox_id)
     delivery.message_id = delivery.message_id or make_msgid(domain=(account.from_email.split("@")[-1] if account else None))
+    record_email_event(session, delivery, "sending", {"attempt": delivery.attempt_count})
     session.commit()
     return delivery.id
 
@@ -231,6 +239,7 @@ def send_claimed_delivery(session: Session, delivery_id: str, worker_id: str) ->
                 smtp.login(account.smtp_login, decrypt_secret(account.smtp_password_encrypted)); refused = smtp.send_message(message)
             if refused: raise smtplib.SMTPRecipientsRefused(refused)
             delivery.status, delivery.sent_at, delivery.provider_message_id, delivery.error = "sent", now_utc(), delivery.message_id, None
+            record_email_event(session, delivery, "sent")
             company = session.get(Company, delivery.company_id)
             if company:
                 company.communication_started_at = company.communication_started_at or delivery.sent_at
@@ -240,11 +249,15 @@ def send_claimed_delivery(session: Session, delivery_id: str, worker_id: str) ->
             code = getattr(exc, "smtp_code", None)
             if (isinstance(code, int) and code >= 500) or isinstance(exc, smtplib.SMTPRecipientsRefused):
                 delivery.status, delivery.bounced_at = "bounced", now_utc()
+                record_email_event(session, delivery, "bounced", {"reason": "hard_bounce"})
                 session.merge(Suppression(email=normalize_email(delivery.recipient_email), reason="hard_bounce", source_delivery_id=delivery.id, active=True))
             else:
                 delivery.status = "send_error"; delivery.next_attempt_at = now_utc() + timedelta(minutes=2 ** min(delivery.attempt_count, 6))
+                record_email_event(session, delivery, "send_error", {"attempt": delivery.attempt_count})
     delivery.locked_at = delivery.locked_by = None
-    session.commit(); return delivery.status
+    session.commit()
+    sync_email_event_to_sheets(session, delivery)
+    return delivery.status
 
 
 def process_queue(session: Session, settings: Settings, worker_id: str, limit: int = 10) -> dict[str, int]:
