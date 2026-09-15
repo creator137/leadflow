@@ -222,6 +222,7 @@ class MailAccountCreate(BaseModel):
     imap_security: Literal["none", "starttls", "ssl"] = "ssl"
     forward_replies_to: str | None = None
     active: bool = True
+    is_primary: bool = False
     daily_limit: int = Field(default=100, ge=1, le=10000)
 
 
@@ -241,6 +242,7 @@ class MailAccountRead(ORMModel):
     imap_security: str
     forward_replies_to: str | None
     active: bool
+    is_primary: bool
     daily_limit: int
     created_at: datetime
     updated_at: datetime
@@ -261,6 +263,7 @@ class MailAccountUpdate(BaseModel):
     imap_security: Literal["none", "starttls", "ssl"] | None = None
     forward_replies_to: str | None = None
     active: bool | None = None
+    is_primary: bool | None = None
     daily_limit: int | None = Field(default=None, ge=1, le=10000)
     smtp_password: str | None = None
     imap_password: str | None = None

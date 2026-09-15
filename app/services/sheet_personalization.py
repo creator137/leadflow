@@ -44,7 +44,9 @@ def _default_template(session: Session, direction: Direction) -> EmailTemplate |
 
 
 def _default_mailbox(session: Session) -> MailAccount | None:
-    return session.scalar(select(MailAccount).where(MailAccount.active.is_(True)).order_by(MailAccount.created_at).limit(1))
+    return session.scalar(select(MailAccount).where(MailAccount.active.is_(True)).order_by(
+        MailAccount.is_primary.desc(), MailAccount.created_at,
+    ).limit(1))
 
 
 def _sheet_status(draft: SheetPersonalizationDraft, delivery: EmailDelivery | None) -> str:

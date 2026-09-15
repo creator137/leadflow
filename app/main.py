@@ -495,6 +495,13 @@ def mail_accounts(session: Session = Depends(get_db)) -> list[MailAccount]:
 @app.post("/api/mail-accounts", response_model=MailAccountRead, status_code=201)
 def create_mail_account(payload: MailAccountCreate, session: Session = Depends(get_db)) -> MailAccount:
     values = payload.model_dump(exclude={"smtp_password", "imap_password"})
+    make_primary = bool(values.get("is_primary")) or not session.scalar(
+        select(MailAccount.id).where(MailAccount.is_primary.is_(True)).limit(1)
+    )
+    values["is_primary"] = make_primary
+    if make_primary:
+        for existing in session.scalars(select(MailAccount).where(MailAccount.is_primary.is_(True))):
+            existing.is_primary = False
     account = MailAccount(
         **values,
         smtp_password_encrypted=encrypt_secret(payload.smtp_password),
@@ -512,6 +519,14 @@ def update_mail_account(account_id: str, payload: MailAccountUpdate, session: Se
     if not account:
         raise HTTPException(404, "Mail account not found")
     values = payload.model_dump(exclude_unset=True)
+    if values.get("is_primary") is True:
+        values["active"] = True
+        for existing in session.scalars(select(MailAccount).where(
+            MailAccount.is_primary.is_(True), MailAccount.id != account_id,
+        )):
+            existing.is_primary = False
+    if values.get("active") is False and account.is_primary:
+        values["is_primary"] = False
     if values.pop("smtp_password", None):
         account.smtp_password_encrypted = encrypt_secret(payload.smtp_password or "")
     if values.pop("imap_password", None):

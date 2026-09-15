@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 from html import escape
+from pathlib import Path
 from urllib.parse import urljoin
 
 from jinja2 import Environment, StrictUndefined, select_autoescape
@@ -22,6 +23,8 @@ from app.services.secrets import decrypt_secret
 from app.services.email_events import record_email_event, sync_email_event_to_sheets
 
 HREF_RE = re.compile(r'(<a\b[^>]*?\bhref=["\'])(https?://[^"\']+)(["\'])', re.I)
+INLINE_LOGO_RE = re.compile(r'https?://[^"\']+/email-assets/bogorodsky-pryanik-logo\.jpg', re.I)
+INLINE_LOGO_CID = "bogorodsky-pryanik-logo"
 template_env = Environment(autoescape=select_autoescape(["html", "xml"]), undefined=StrictUndefined)
 
 
@@ -86,6 +89,26 @@ def imap_connection(account: MailAccount):
     client = imaplib.IMAP4(account.imap_host, account.imap_port, timeout=20)
     if account.imap_security == "starttls": client.starttls()
     return client
+
+
+def build_email_message(delivery: EmailDelivery, account: MailAccount) -> EmailMessage:
+    message = EmailMessage()
+    message["Subject"], message["From"], message["To"] = delivery.subject, formataddr((account.from_name or account.name, account.from_email)), delivery.recipient_email
+    if account.reply_to: message["Reply-To"] = account.reply_to
+    message["Message-ID"], message["X-LeadFlow-ID"] = delivery.message_id, delivery.id
+    if delivery.in_reply_to:
+        message["In-Reply-To"] = delivery.in_reply_to
+        message["References"] = delivery.in_reply_to
+    message.set_content(delivery.text_body or "Это письмо содержит HTML-версию.")
+    html_body, replacements = INLINE_LOGO_RE.subn(f"cid:{INLINE_LOGO_CID}", delivery.html_body)
+    message.add_alternative(html_body, subtype="html")
+    logo_path = Path(__file__).resolve().parents[2] / "logo.jpg"
+    if replacements and logo_path.is_file():
+        message.get_payload()[-1].add_related(
+            logo_path.read_bytes(), maintype="image", subtype="jpeg",
+            cid=f"<{INLINE_LOGO_CID}>", filename="bogorodsky-pryanik-logo.jpg", disposition="inline",
+        )
+    return message
 
 
 def diagnose_smtp(account: MailAccount) -> dict[str, bool | str]:
@@ -228,14 +251,7 @@ def send_claimed_delivery(session: Session, delivery_id: str, worker_id: str) ->
         delivery.next_attempt_at = now_utc() + timedelta(minutes=2 ** min(delivery.attempt_count, 6))
         record_email_event(session, delivery, "send_error", {"attempt": delivery.attempt_count})
     else:
-        message = EmailMessage()
-        message["Subject"], message["From"], message["To"] = delivery.subject, formataddr((account.from_name or account.name, account.from_email)), delivery.recipient_email
-        if account.reply_to: message["Reply-To"] = account.reply_to
-        message["Message-ID"], message["X-LeadFlow-ID"] = delivery.message_id, delivery.id
-        if delivery.in_reply_to:
-            message["In-Reply-To"] = delivery.in_reply_to
-            message["References"] = delivery.in_reply_to
-        message.set_content(delivery.text_body or "Это письмо содержит HTML-версию."); message.add_alternative(delivery.html_body, subtype="html")
+        message = build_email_message(delivery, account)
         try:
             with smtp_connection(account) as smtp:
                 smtp.login(account.smtp_login, decrypt_secret(account.smtp_password_encrypted)); refused = smtp.send_message(message)

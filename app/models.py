@@ -294,6 +294,7 @@ class MailAccount(Base):
     imap_last_uid: Mapped[int] = mapped_column(Integer, default=0)
     forward_replies_to: Mapped[str | None] = mapped_column(String(320))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     daily_limit: Mapped[int] = mapped_column(Integer, default=100)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

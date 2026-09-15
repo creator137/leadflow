@@ -9,7 +9,7 @@ from app.db import Base
 from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailEvent, EmailTemplate, InboundReply, MailAccount, Suppression, TrackedLink
 from app.schemas import MailAccountRead
 from app.services.imap_monitor import classify_bounce, process_inbound
-from app.services.mailing import build_delivery, claim_delivery, diagnose_smtp, queue_campaign, send_claimed_delivery, send_delivery
+from app.services.mailing import build_delivery, build_email_message, claim_delivery, diagnose_smtp, queue_campaign, send_claimed_delivery, send_delivery
 from app.services.secrets import encrypt_secret
 
 
@@ -44,6 +44,19 @@ def test_mailbox_passwords_are_write_only(db: Session) -> None:
     payload = MailAccountRead.model_validate(account).model_dump()
     assert "smtp_password" not in payload and "imap_password" not in payload
     assert "smtp_password_encrypted" not in payload and "imap_password_encrypted" not in payload
+
+
+def test_proposal_logo_is_attached_inline(db: Session) -> None:
+    _, company, account, template = setup(db)
+    delivery = build_delivery(db, company, account, template, Settings(public_base_url="https://leadflow.example"))
+    delivery.html_body = '<html><img alt="Богородский пряник" src="https://leadflow.example/email-assets/bogorodsky-pryanik-logo.jpg"></html>'
+    delivery.message_id = "<test@example.test>"
+    message = build_email_message(delivery, account)
+    html_part = next(part for part in message.walk() if part.get_content_type() == "text/html")
+    logo_part = next(part for part in message.walk() if part.get("Content-ID") == "<bogorodsky-pryanik-logo>")
+    assert "cid:bogorodsky-pryanik-logo" in html_part.get_content()
+    assert logo_part.get_content_type() == "image/jpeg"
+    assert len(logo_part.get_payload(decode=True)) > 10_000
 
 
 def test_campaign_queue_is_direction_limited_and_idempotent(db: Session) -> None:
