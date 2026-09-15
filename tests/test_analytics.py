@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.models import (
-    AIRequestLog, Company, CompanyDirection, CompanyFieldProvenance, Direction, DirectionRun, EmailDelivery,
+    AIRequestLog, Company, CompanyDirection, CompanyFieldProvenance, Direction, DirectionRun, EmailDelivery, EmailEvent,
     EmailTemplate, MailAccount, SearchObservation,
 )
 from app.services.analytics import analytics
@@ -28,7 +28,9 @@ def seed(session: Session):
         SearchObservation(run_id=run.id, direction_id=direction.id, company_id=company.id, source="yandex_maps", query="ресторан", city="Москва", is_new=True, has_phone=True, has_email=True, has_website=True, has_branches_count=True, observed_at=now),
         SearchObservation(run_id=run.id, direction_id=direction.id, company_id=company.id, source="two_gis", query="кафе", city="Москва", is_new=False, has_phone=True, has_email=False, has_website=True, has_branches_count=True, observed_at=now),
     ])
-    session.add(EmailDelivery(company_id=company.id, direction_id=direction.id, mailbox_id=mailbox.id, template_id=template.id, recipient_email="info@example.ru", subject="Здравствуйте", html_body="<p>Текст</p>", text_body="Текст", status="replied", tracking_token="track", unsubscribe_token="unsub", sent_at=now, opened_at=now, replied_at=now, created_at=now))
+    delivery = EmailDelivery(company_id=company.id, direction_id=direction.id, mailbox_id=mailbox.id, template_id=template.id, recipient_email="info@example.ru", subject="Здравствуйте", html_body="<p>Текст</p>", text_body="Текст", status="replied", tracking_token="track", unsubscribe_token="unsub", sent_at=now, opened_at=now, replied_at=now, created_at=now)
+    session.add(delivery); session.flush()
+    session.add(EmailEvent(delivery_id=delivery.id, company_id=company.id, event_type="send_error", occurred_at=now))
     session.add(AIRequestLog(operation="website_enrichment", company_id=company.id, model="deepseek-flash",
         request_key="ai-request", content_hash="hash", missing_fields=["decision_maker_name"], prompt_version="v1",
         input_tokens=100, output_tokens=10, success=True, created_at=now))
@@ -49,6 +51,7 @@ def test_analytics_aggregations_match_reference_sql_and_filters() -> None:
         assert result["overview"]["duplicates"] == 1
         assert result["overview"]["with_website"] == 1
         assert result["email"]["sent"] == result["email"]["replied"] == 1
+        assert result["email"]["errors"] == 1
         assert {row["name"] for row in result["sources"]["rows"]} == {"yandex_maps", "two_gis"}
         assert {row["name"] for row in result["queries"]} == {"ресторан", "кафе"}
         assert result["cities"][0]["name"] == "Москва"

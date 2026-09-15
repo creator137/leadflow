@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     AIRequestLog, Company, CompanyDirection, CompanyFieldProvenance, Direction, DirectionRun,
-    EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun, InboundReply,
+    EmailDelivery, EmailEvent, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun, InboundReply,
     MailAccount, SearchObservation, SheetRowMapping, Suppression,
 )
 from app.services.user_errors import human_error
@@ -65,12 +65,17 @@ def analytics(
     else:
         delivery_stmt = select(EmailDelivery).where(*delivery_conditions)
     deliveries = list(session.scalars(delivery_stmt))
+    delivery_ids = {item.id for item in deliveries}
+    historical_send_errors = _n(session.scalar(select(func.count(distinct(EmailEvent.delivery_id))).where(
+        EmailEvent.delivery_id.in_(delivery_ids), EmailEvent.event_type == "send_error",
+        EmailEvent.occurred_at >= start, EmailEvent.occurred_at <= end,
+    ))) if delivery_ids else 0
 
     sent = sum(item.sent_at is not None for item in deliveries)
     email_counts = {
         "queued": sum(item.status in {"queued", "sending"} for item in deliveries),
         "sent": sent,
-        "errors": sum(item.status in {"failed", "send_error"} for item in deliveries),
+        "errors": max(historical_send_errors, sum(item.status in {"failed", "send_error"} for item in deliveries)),
         "opened": sum(item.opened_at is not None for item in deliveries),
         "clicked": sum(item.clicked_at is not None for item in deliveries),
         "replied": sum(item.replied_at is not None for item in deliveries),
