@@ -225,6 +225,8 @@ def send_claimed_delivery(session: Session, delivery_id: str, worker_id: str) ->
     account = session.get(MailAccount, delivery.mailbox_id)
     if not account or not account.active or is_suppressed(session, delivery.recipient_email):
         delivery.status, delivery.error = "send_error", "Mailbox inactive or recipient suppressed"
+        delivery.next_attempt_at = now_utc() + timedelta(minutes=2 ** min(delivery.attempt_count, 6))
+        record_email_event(session, delivery, "send_error", {"attempt": delivery.attempt_count})
     else:
         message = EmailMessage()
         message["Subject"], message["From"], message["To"] = delivery.subject, formataddr((account.from_name or account.name, account.from_email)), delivery.recipient_email
@@ -274,4 +276,5 @@ def send_delivery(session: Session, delivery: EmailDelivery, account: MailAccoun
     delivery.status, delivery.locked_by, delivery.locked_at = "sending", worker_id, now_utc()
     delivery.attempt_count += 1
     delivery.message_id = delivery.message_id or make_msgid(domain=account.from_email.split("@")[-1])
+    record_email_event(session, delivery, "sending", {"attempt": delivery.attempt_count})
     session.commit(); send_claimed_delivery(session, delivery.id, worker_id)

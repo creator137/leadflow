@@ -9,7 +9,7 @@ from app.db import Base
 from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailEvent, EmailTemplate, InboundReply, MailAccount, Suppression, TrackedLink
 from app.schemas import MailAccountRead
 from app.services.imap_monitor import classify_bounce, process_inbound
-from app.services.mailing import build_delivery, claim_delivery, diagnose_smtp, queue_campaign, send_claimed_delivery
+from app.services.mailing import build_delivery, claim_delivery, diagnose_smtp, queue_campaign, send_claimed_delivery, send_delivery
 from app.services.secrets import encrypt_secret
 
 
@@ -87,6 +87,20 @@ def test_atomic_claim_and_send_updates_company(db: Session, monkeypatch) -> None
     assert delivery.message_id and delivery.sent_at and delivery.attempt_count == 1
     assert company.action == "Отправлено предложение" and company.communication_started_at
     assert [row.event_type for row in db.scalars(select(EmailEvent).order_by(EmailEvent.occurred_at))] == ["queued", "sending", "sent"]
+
+
+def test_unavailable_mailbox_records_error_and_defers_retry(db: Session) -> None:
+    _, company, account, template = setup(db)
+    delivery = build_delivery(db, company, account, template, Settings(public_base_url="https://lead.test"))
+    account.active = False; db.commit()
+    send_delivery(db, delivery, account)
+    db.refresh(delivery)
+    assert delivery.status == "send_error" and delivery.next_attempt_at is not None
+    account.active = True; db.commit()
+    assert claim_delivery(db, "too-early-retry") is None
+    assert [row.event_type for row in db.scalars(select(EmailEvent).order_by(EmailEvent.occurred_at))] == [
+        "queued", "sending", "send_error",
+    ]
 
 
 def test_automatic_campaign_uses_matching_direction_template(db: Session) -> None:
