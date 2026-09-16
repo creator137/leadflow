@@ -34,6 +34,20 @@ docker compose up -d --build
 Without a local `.env`, the admin UI/API use development Basic Auth credentials
 `admin` / `change-me-before-production`. Override both values before deployment.
 
+### Самостоятельная настройка администратором
+
+- Мастер «Добавить сферу» создаёт направление поиска, шаблон персонального КП,
+  обычный шаблон без ИИ и автоматическую рассылку.
+- «Данные отправителя» используются только при создании новых черновиков.
+  Существующий черновик сохраняет свою подпись до ручного изменения, а
+  отправленный HTML/text snapshot остаётся неизменяемым.
+- Файлы направления прикладываются к новым персональным и автоматическим
+  письмам. Список фиксируется в черновике: изменение файлов направления не
+  меняет существующий черновик и отправленную историю.
+- Автоматическая рассылка использует только обычный `EmailTemplate` и не
+  вызывает DeepSeek. Ручной запуск также соблюдает suppression, cooldown,
+  idempotency и дневные лимиты.
+
 Open API documentation at <http://localhost:8000/docs>.
 
 The primary admin workflow is **Directions** at <http://localhost:8000/>. A

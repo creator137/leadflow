@@ -169,6 +169,7 @@ def serialize_draft(draft: SheetPersonalizationDraft) -> dict[str, Any]:
     return {
         "id": draft.id, "company_id": draft.company_id, "template_id": draft.template_id,
         "mailbox_id": draft.mailbox_id, "status": draft.status, "subject": draft.subject,
+        "recipient_email": draft.recipient_email, "attachments": draft.attachments_snapshot or [],
         "direction_id": draft.direction_id, "proposal_template_id": draft.proposal_template_id,
         "template_version": draft.template_version, "greeting": draft.greeting, "main_body": draft.main_body,
         "ai_personalization": draft.ai_personalization, "extra_block": draft.extra_block, "cta": draft.cta,

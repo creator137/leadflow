@@ -14,11 +14,12 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import (
     Company, CompanyDirection, Direction, DirectionProposalTemplate, EmailDelivery, EmailTemplate,
-    GoogleSheetsConfig, MailAccount, SheetPersonalizationDraft, WebsiteAnalysis,
+    GoogleSheetsConfig, MailAccount, SenderSettings, SheetPersonalizationDraft, WebsiteAnalysis,
 )
 from app.services.company_enrichment import WebsiteAnalysisService
 from app.services.deepseek import DeepSeekClient, DeepSeekError, ai_settings
 from app.services.mailing import build_delivery
+from app.services.attachments import active_attachments
 
 
 DEFAULT_SIGNATURE = """С уважением,
@@ -94,11 +95,62 @@ def ensure_proposal_template(session: Session, direction: Direction) -> Directio
     copy = default_copy(direction.name)
     row = DirectionProposalTemplate(
         direction_id=direction.id, subject=copy.subject, greeting="Здравствуйте!", main_body=copy.main_body,
-        extra_block=copy.extra_block, cta=copy.cta, signature=DEFAULT_SIGNATURE,
+        extra_block=copy.extra_block, cta=copy.cta, signature="",
         ai_instruction=AI_INSTRUCTION, ai_personalization_enabled=True,
     )
     session.add(row)
     session.flush()
+    return row
+
+
+def get_sender_settings(session: Session) -> SenderSettings:
+    row = session.get(SenderSettings, "default")
+    if row:
+        return row
+    row = SenderSettings(
+        id="default", display_name="Агеева Юлия", position="специалист по развитию",
+        company_name="Богородский пряник", phone="+7 916 208-66-28",
+        email="zakaz-1.1@bogp.ru", website="https://www.bogorodsk-pryanik.ru",
+        product_description=("Брендированные пряники и подарочные наборы с индивидуальной формой, "
+                             "рисунком или надписью. Доставка по России."),
+        logo_path="logo.jpg", signature_text=DEFAULT_SIGNATURE,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def default_automatic_text(direction_name: str) -> tuple[str, str]:
+    copy = default_copy(direction_name)
+    text = (
+        "Здравствуйте!\n\n" + copy.main_body +
+        "\n\n" + copy.cta +
+        "\n\nС уважением,\n{{sender_name}}\n{{sender_position}}\n{{sender_phone}}\n{{sender_email}}\n{{sender_site}}"
+    )
+    return copy.subject, text
+
+
+def ensure_direction_email_template(session: Session, direction: Direction) -> EmailTemplate:
+    row = session.get(EmailTemplate, direction.automatic_template_id) if direction.automatic_template_id else None
+    if not row:
+        row = session.scalar(select(EmailTemplate).where(
+            EmailTemplate.direction_id == direction.id,
+            EmailTemplate.active.is_(True),
+        ).order_by(EmailTemplate.created_at).limit(1))
+    if not row:
+        subject, text = default_automatic_text(direction.name)
+        escaped = html.escape(text).replace("\n", "<br>")
+        # Restore Jinja variables after escaping; values remain autoescaped at render time.
+        escaped = re.sub(r"\{\{\s*(\w+)\s*\}\}", r"{{ \1 }}", escaped)
+        row = EmailTemplate(
+            name=f"Автоматическое письмо — {direction.name}", direction_id=direction.id,
+            subject_template=subject, text_template=text,
+            html_template=f'<div style="font-family:Arial,sans-serif;font-size:16px;line-height:1.55">{escaped}</div>',
+            active=True,
+        )
+        session.add(row)
+        session.flush()
+    direction.automatic_template_id = row.id
     return row
 
 
@@ -121,6 +173,12 @@ def ensure_all_proposal_templates(session: Session) -> None:
         if not session.scalar(select(DirectionProposalTemplate.id).where(DirectionProposalTemplate.direction_id == direction.id)):
             ensure_proposal_template(session, direction)
             changed = True
+        if not direction.automatic_template_id:
+            ensure_direction_email_template(session, direction)
+            changed = True
+    if not session.get(SenderSettings, "default"):
+        get_sender_settings(session)
+        changed = True
     if changed:
         session.commit()
 
@@ -228,19 +286,7 @@ def direction_for_company(session: Session, company_id: str) -> Direction | None
 
 
 def delivery_template_for_direction(session: Session, direction: Direction) -> EmailTemplate:
-    row = session.scalar(select(EmailTemplate).where(
-        EmailTemplate.direction_id == direction.id, EmailTemplate.active.is_(True)
-    ).order_by(EmailTemplate.created_at).limit(1))
-    if row:
-        return row
-    row = EmailTemplate(
-        name=f"КП — {direction.name}", direction_id=direction.id,
-        subject_template="Персональное предложение", html_template="<p>{{ company_name }}</p>",
-        text_template="{{ company_name }}", active=True,
-    )
-    session.add(row)
-    session.flush()
-    return row
+    return ensure_direction_email_template(session, direction)
 
 
 def _replace_business_fields(value: str, company: Company) -> str:
@@ -303,6 +349,7 @@ def prepare_proposal_draft(
     if not direction:
         raise ValueError("Направление компании не найдено.")
     business_template = ensure_proposal_template(session, direction)
+    sender = get_sender_settings(session)
     legacy_template = delivery_template_for_direction(session, direction)
     command_key = command_key or hashlib.sha256(f"proposal-draft-v1:{company.id}:{business_template.version}".encode()).hexdigest()
     draft = session.scalar(select(SheetPersonalizationDraft).where(SheetPersonalizationDraft.command_key == command_key))
@@ -315,6 +362,8 @@ def prepare_proposal_draft(
             template_id=legacy_template.id, proposal_template_id=business_template.id,
             template_version=business_template.version, mailbox_id=mailbox.id if mailbox else None,
             command_key=command_key, status="preparing",
+            recipient_email=(company.decision_maker_email or company.company_email or company.email),
+            attachments_snapshot=active_attachments(session, direction.id),
         )
         session.add(draft)
         session.flush()
@@ -348,6 +397,10 @@ def prepare_proposal_draft(
     draft.template_id = legacy_template.id
     draft.template_version = draft.template_version or business_template.version
     draft.request_key = request_key
+    if not draft.recipient_email:
+        draft.recipient_email = company.decision_maker_email or company.company_email or company.email
+    if not draft.attachments_snapshot:
+        draft.attachments_snapshot = active_attachments(session, direction.id)
     if created or not draft.subject:
         draft.subject = business_template.subject
     if created or not draft.greeting:
@@ -360,7 +413,7 @@ def prepare_proposal_draft(
     if created or not draft.cta:
         draft.cta = business_template.cta
     if created or not draft.signature:
-        draft.signature = business_template.signature
+        draft.signature = business_template.signature.strip() or sender.signature_text
     draft.ai_evidence = evidence
     draft.ai_response_data = ai_result.model_dump()
     draft.facts = evidence
@@ -375,7 +428,7 @@ def prepare_proposal_draft(
 def update_proposal_draft(session: Session, draft: SheetPersonalizationDraft, values: dict[str, Any], settings: Settings) -> SheetPersonalizationDraft:
     if draft.status == "sent":
         raise ValueError("Отправленное письмо нельзя изменить.")
-    editable = {"subject", "greeting", "main_body", "ai_personalization", "extra_block", "cta", "signature", "mailbox_id"}
+    editable = {"subject", "greeting", "main_body", "ai_personalization", "extra_block", "cta", "signature", "mailbox_id", "recipient_email"}
     for key, value in values.items():
         if key in editable:
             setattr(draft, key, value)
@@ -408,7 +461,8 @@ def send_proposal_draft(
     rendered = render_proposal(draft, company, settings)
     delivery = build_delivery(
         session, company, mailbox, template, settings, direction_id=draft.direction_id, send_mode=send_mode,
-        overrides=rendered, recipient_override=recipient_override,
+        overrides=rendered, recipient_override=recipient_override or draft.recipient_email,
+        attachments_snapshot=draft.attachments_snapshot or [],
         idempotency_key=f"proposal-draft:{draft.id}:{'test:' + recipient_override if recipient_override else 'send'}",
     )
     if not recipient_override:

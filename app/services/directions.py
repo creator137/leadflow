@@ -57,14 +57,15 @@ def replace_children(session: Session, direction: Direction, payload: DirectionC
         session.add_all(DirectionSource(direction_id=direction.id, source=source) for source in dict.fromkeys(payload.sources))
 
 
-def create_direction(session: Session, payload: DirectionCreate) -> Direction:
+def create_direction(session: Session, payload: DirectionCreate, *, commit: bool = True) -> Direction:
     values = payload.model_dump(exclude={"queries", "locations", "sources"})
     direction = Direction(**values, slug=_unique_slug(session, payload.name))
     session.add(direction)
     session.flush()
     replace_children(session, direction, payload)
-    session.commit()
-    session.refresh(direction)
+    if commit:
+        session.commit()
+        session.refresh(direction)
     return direction
 
 

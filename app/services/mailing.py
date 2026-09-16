@@ -17,10 +17,11 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import Settings, is_branded_https_url, is_public_https_url
-from app.models import Campaign, Company, CompanyDirection, EmailDelivery, EmailTemplate, MailAccount, Suppression, TrackedLink
+from app.config import Settings, get_settings, is_branded_https_url, is_public_https_url
+from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailTemplate, MailAccount, SenderSettings, Suppression, TrackedLink
 from app.services.secrets import decrypt_secret
 from app.services.email_events import record_email_event, sync_email_event_to_sheets
+from app.services.attachments import active_attachments, attachment_path
 
 HREF_RE = re.compile(r'(<a\b[^>]*?\bhref=["\'])(https?://[^"\']+)(["\'])', re.I)
 INLINE_LOGO_RE = re.compile(r'https?://[^"\']+/email-assets/bogorodsky-pryanik-logo\.jpg', re.I)
@@ -52,6 +53,8 @@ def render_template_parts(template: EmailTemplate, company: Company, extra: dict
         "decision_maker_name": company.decision_maker_name or "",
         "decision_maker_position": company.decision_maker_position or "",
         "sender_name": (account.from_name or account.name) if account else "",
+        "sender_position": "", "sender_phone": "", "sender_email": account.from_email if account else "",
+        "sender_site": "", "sender_company": "",
     }
     context.update(extra or {})
     return (
@@ -59,6 +62,18 @@ def render_template_parts(template: EmailTemplate, company: Company, extra: dict
         template_env.from_string(template.html_template).render(context),
         template_env.from_string(template.text_template or "").render(context),
     )
+
+
+def sender_template_context(session: Session, account: MailAccount | None = None) -> dict[str, str]:
+    row = session.get(SenderSettings, "default")
+    return {
+        "sender_name": (row.display_name if row else None) or ((account.from_name or account.name) if account else ""),
+        "sender_position": (row.position if row else None) or "",
+        "sender_phone": (row.phone if row else None) or "",
+        "sender_email": (row.email if row else None) or (account.from_email if account else ""),
+        "sender_site": (row.website if row else None) or "",
+        "sender_company": (row.company_name if row else None) or "",
+    }
 
 
 def render_template(template: EmailTemplate, company: Company, extra: dict[str, str] | None = None, account: MailAccount | None = None) -> tuple[str, str]:
@@ -159,6 +174,14 @@ def build_email_message(delivery: EmailDelivery, account: MailAccount) -> EmailM
             logo_path.read_bytes(), maintype="image", subtype="jpeg",
             cid=f"<{INLINE_LOGO_CID}>", filename="bogorodsky-pryanik-logo.jpg", disposition="inline",
         )
+    settings = get_settings()
+    for item in delivery.attachments_snapshot or []:
+        path = attachment_path(settings, str(item.get("storage_name") or ""))
+        if not path.is_file():
+            raise FileNotFoundError(f"Не найден файл вложения: {item.get('filename') or 'файл'}")
+        content_type = str(item.get("content_type") or "application/octet-stream")
+        maintype, subtype = content_type.split("/", 1) if "/" in content_type else ("application", "octet-stream")
+        message.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=str(item.get("filename") or path.name))
     return message
 
 
@@ -209,7 +232,7 @@ def mailbox_daily_limit_reached(session: Session, account: MailAccount) -> bool:
     return used + pending >= account.daily_limit
 
 
-def build_delivery(session: Session, company: Company, account: MailAccount, template: EmailTemplate, settings: Settings, *, campaign: Campaign | None = None, direction_id: str | None = None, send_mode: str = "manual", overrides: dict[str, str | None] | None = None, extra: dict[str, str] | None = None, recipient_override: str | None = None, idempotency_key: str | None = None) -> EmailDelivery:
+def build_delivery(session: Session, company: Company, account: MailAccount, template: EmailTemplate, settings: Settings, *, campaign: Campaign | None = None, direction_id: str | None = None, send_mode: str = "manual", overrides: dict[str, str | None] | None = None, extra: dict[str, str] | None = None, recipient_override: str | None = None, idempotency_key: str | None = None, attachments_snapshot: list[dict[str, object]] | None = None) -> EmailDelivery:
     if idempotency_key:
         existing = session.scalar(select(EmailDelivery).where(EmailDelivery.idempotency_key == idempotency_key))
         if existing:
@@ -224,16 +247,22 @@ def build_delivery(session: Session, company: Company, account: MailAccount, tem
         cutoff = now_utc() - timedelta(days=campaign.cooldown_days)
         if session.scalar(select(EmailDelivery.id).where(EmailDelivery.recipient_email == recipient, EmailDelivery.sent_at >= cutoff)):
             raise ValueError("Recipient is in the configured cooldown period")
-    subject, html, text = render_template_parts(template, company, extra=extra, account=account)
+    merged_extra = sender_template_context(session, account)
+    merged_extra.update(extra or {})
+    subject, html, text = render_template_parts(template, company, extra=merged_extra, account=account)
     overrides = overrides or {}
     subject, html = overrides.get("subject") or subject, overrides.get("html_body") or html
     text = overrides.get("text_body") if overrides.get("text_body") is not None else text
+    resolved_direction_id = direction_id or (campaign.direction_id if campaign else template.direction_id)
     delivery = EmailDelivery(
-        campaign_id=campaign.id if campaign else None, direction_id=direction_id or (campaign.direction_id if campaign else template.direction_id),
+        campaign_id=campaign.id if campaign else None, direction_id=resolved_direction_id,
         company_id=company.id, mailbox_id=account.id, template_id=template.id, recipient_email=recipient,
         recipient_name=company.decision_maker_name, subject=subject, html_body="", text_body=text or "", send_mode=send_mode,
         status="queued", tracking_token=secrets.token_urlsafe(32), unsubscribe_token=secrets.token_urlsafe(32), next_attempt_at=now_utc(),
         idempotency_key=idempotency_key,
+        attachments_snapshot=attachments_snapshot if attachments_snapshot is not None else (
+            active_attachments(session, resolved_direction_id) if resolved_direction_id else []
+        ),
     )
     session.add(delivery); session.flush()
     delivery.html_body = add_tracking(session, delivery, html, settings, account)
@@ -246,9 +275,10 @@ def build_delivery(session: Session, company: Company, account: MailAccount, tem
 def queue_campaign(session: Session, campaign: Campaign, settings: Settings) -> dict[str, int]:
     account, template = session.get(MailAccount, campaign.mailbox_id), session.get(EmailTemplate, campaign.template_id)
     if campaign.direction_id and (not template or template.direction_id != campaign.direction_id):
-        template = session.scalar(select(EmailTemplate).where(
-            EmailTemplate.direction_id == campaign.direction_id,
-            EmailTemplate.active.is_(True),
+        direction = session.get(Direction, campaign.direction_id)
+        template = session.get(EmailTemplate, direction.automatic_template_id) if direction and direction.automatic_template_id else None
+        template = template or session.scalar(select(EmailTemplate).where(
+            EmailTemplate.direction_id == campaign.direction_id, EmailTemplate.active.is_(True),
         ).order_by(EmailTemplate.created_at).limit(1))
     if not account or not account.active or not template or not template.active: raise ValueError("Campaign mailbox or template is inactive")
     today = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -275,7 +305,21 @@ def queue_campaign(session: Session, campaign: Campaign, settings: Settings) -> 
 
 
 def execute_campaign(session: Session, campaign: Campaign, settings: Settings) -> dict[str, int]:
-    return queue_campaign(session, campaign, settings)
+    campaign.last_run_at = now_utc()
+    try:
+        result = queue_campaign(session, campaign, settings)
+        campaign.last_queued = result["queued"]
+        campaign.last_error = None
+        session.commit()
+        return result
+    except Exception as exc:
+        session.rollback()
+        campaign = session.get(Campaign, campaign.id)
+        campaign.last_run_at = now_utc()
+        campaign.last_queued = 0
+        campaign.last_error = safe_mail_error(exc) if not isinstance(exc, ValueError) else str(exc)
+        session.commit()
+        raise
 
 
 def claim_delivery(session: Session, worker_id: str) -> str | None:

@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     deepseek_input_cost_per_million: float = 0.30
     deepseek_cached_input_cost_per_million: float = 0.006
     deepseek_output_cost_per_million: float = 1.20
+    attachment_storage_dir: str = "/app/data/attachments"
 
 
 @lru_cache

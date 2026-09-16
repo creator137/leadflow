@@ -50,6 +50,8 @@ services:
       - 1.1.1.1
     ports:
       - "8000:8000"
+    volumes:
+      - attachment_data:/app/data/attachments
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -69,6 +71,8 @@ services:
       - 8.8.8.8
       - 1.1.1.1
     command: ["python", "-m", "app.worker"]
+    volumes:
+      - attachment_data:/app/data/attachments
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -76,3 +80,4 @@ services:
 
 volumes:
   postgres_data:
+  attachment_data:

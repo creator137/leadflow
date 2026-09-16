@@ -8,7 +8,10 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 
-PAGES = ["home", "companies", "directions", "letters", "templates", "mailboxes", "sheets", "analytics", "settings"]
+PAGES = [
+    "home", "companies", "directions", "phraseSearch", "campaigns", "letters", "templates",
+    "proposals", "mailboxes", "sender", "sheets", "analytics", "settings",
+]
 VIEWPORTS = [(1920, 1080, "desktop"), (1366, 768, "laptop"), (390, 844, "mobile")]
 
 

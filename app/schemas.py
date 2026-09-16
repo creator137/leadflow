@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -123,6 +124,32 @@ class DirectionUpdate(BaseModel):
         return value.strip() if value else value
 
 
+class DirectionWizardCreate(BaseModel):
+    direction: DirectionCreate
+    proposal_subject: str = Field(min_length=1, max_length=500)
+    proposal_greeting: str = Field(min_length=1, max_length=2000)
+    proposal_main_body: str = Field(min_length=1, max_length=10_000)
+    proposal_extra_block: str = Field(default="", max_length=4000)
+    proposal_cta: str = Field(min_length=1, max_length=4000)
+    proposal_signature_override: str = Field(default="", max_length=4000)
+    proposal_ai_instruction: str = Field(min_length=1, max_length=4000)
+    proposal_ai_enabled: bool = True
+    email_template_subject: str = Field(min_length=1, max_length=500)
+    email_template_text: str = Field(min_length=1, max_length=20_000)
+    mailbox_id: str
+    campaign_name: str = Field(min_length=1, max_length=255)
+    campaign_daily_limit: int = Field(default=50, ge=1, le=10_000)
+    campaign_schedule: str | None = None
+    campaign_enabled: bool = False
+
+    @field_validator("campaign_schedule")
+    @classmethod
+    def valid_campaign_schedule(cls, value: str | None) -> str | None:
+        if value:
+            CronTrigger.from_crontab(value, timezone="UTC")
+        return value
+
+
 class DirectionQueryRead(DirectionQueryInput, ORMModel):
     id: str
 
@@ -225,6 +252,16 @@ class MailAccountCreate(BaseModel):
     is_primary: bool = False
     daily_limit: int = Field(default=100, ge=1, le=10000)
 
+    @field_validator("from_email", "reply_to", "forward_replies_to")
+    @classmethod
+    def valid_mail_address(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip().casefold()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
+            raise ValueError("Укажите корректный email")
+        return value
+
 
 class MailAccountRead(ORMModel):
     id: str
@@ -268,6 +305,16 @@ class MailAccountUpdate(BaseModel):
     smtp_password: str | None = None
     imap_password: str | None = None
 
+    @field_validator("from_email", "reply_to", "forward_replies_to")
+    @classmethod
+    def valid_mail_address(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip().casefold()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
+            raise ValueError("Укажите корректный email")
+        return value
+
 
 class EmailTemplateCreate(BaseModel):
     name: str
@@ -310,10 +357,21 @@ class CampaignCreate(BaseModel):
     status: Literal["paused", "running", "completed"] = "paused"
     active: bool = False
 
+    @field_validator("schedule")
+    @classmethod
+    def valid_schedule(cls, value: str | None) -> str | None:
+        if value:
+            CronTrigger.from_crontab(value, timezone="UTC")
+        return value
+
 
 class CampaignRead(CampaignCreate, ORMModel):
     id: str
     created_at: datetime
+    updated_at: datetime
+    last_run_at: datetime | None = None
+    last_queued: int = 0
+    last_error: str | None = None
 
 
 class CampaignUpdate(BaseModel):
@@ -330,6 +388,13 @@ class CampaignUpdate(BaseModel):
     cooldown_days: int | None = Field(default=None, ge=0, le=3650)
     status: Literal["paused", "running", "completed"] | None = None
     active: bool | None = None
+
+    @field_validator("schedule")
+    @classmethod
+    def valid_schedule(cls, value: str | None) -> str | None:
+        if value:
+            CronTrigger.from_crontab(value, timezone="UTC")
+        return value
 
 
 class DeliveryRead(ORMModel):
@@ -482,6 +547,17 @@ class ProposalDraftUpdate(BaseModel):
     cta: str | None = Field(default=None, max_length=4000)
     signature: str | None = Field(default=None, max_length=4000)
     mailbox_id: str | None = None
+    recipient_email: str | None = Field(default=None, max_length=320)
+
+    @field_validator("recipient_email")
+    @classmethod
+    def valid_recipient_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().casefold()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
+            raise ValueError("Укажите корректный email получателя")
+        return value
 
 
 class ProposalTemplateUpdate(BaseModel):
@@ -504,3 +580,14 @@ class AISettingsUpdate(BaseModel):
     enrichment_enabled: bool | None = None
     personalization_enabled: bool | None = None
     daily_request_limit: int | None = Field(default=None, ge=1, le=10_000)
+
+
+class SenderSettingsUpdate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=255)
+    position: str | None = Field(default=None, max_length=255)
+    company_name: str = Field(min_length=1, max_length=255)
+    phone: str | None = Field(default=None, max_length=100)
+    email: str | None = Field(default=None, max_length=320)
+    website: str | None = Field(default=None, max_length=2000)
+    product_description: str = Field(default="", max_length=10_000)
+    signature_text: str = Field(default="", max_length=4000)

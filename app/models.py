@@ -79,6 +79,9 @@ class Direction(Base):
     schedule: Mapped[str | None] = mapped_column(String(100))
     email_enrichment_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     ai_enrichment_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    automatic_template_id: Mapped[str | None] = mapped_column(
+        ForeignKey("email_templates.id", ondelete="SET NULL", use_alter=True), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -129,6 +132,22 @@ class CompanyDirection(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     __table_args__ = (UniqueConstraint("company_id", "direction_id", name="uq_company_direction"),)
+
+
+class DirectionAttachment(Base):
+    __tablename__ = "direction_attachments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), nullable=False, index=True)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    content_type: Mapped[str] = mapped_column(String(150), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (UniqueConstraint("direction_id", "sha256", name="uq_direction_attachment_sha"),)
 
 
 class CompanySourceRecord(Base):
@@ -355,6 +374,9 @@ class Campaign(Base):
     cooldown_days: Mapped[int] = mapped_column(Integer, default=30)
     status: Mapped[str] = mapped_column(String(32), default="paused", index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_queued: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -394,6 +416,7 @@ class EmailDelivery(Base):
     replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     bounced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     unsubscribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attachments_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -488,6 +511,22 @@ class AISettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class SenderSettings(Base):
+    __tablename__ = "sender_settings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    position: Mapped[str | None] = mapped_column(String(255))
+    company_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    phone: Mapped[str | None] = mapped_column(String(100))
+    email: Mapped[str | None] = mapped_column(String(320))
+    website: Mapped[str | None] = mapped_column(Text)
+    product_description: Mapped[str] = mapped_column(Text, default="")
+    logo_path: Mapped[str] = mapped_column(String(255), default="logo.jpg")
+    signature_text: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class WebsiteAnalysis(Base):
     __tablename__ = "website_analyses"
 
@@ -541,6 +580,7 @@ class SheetPersonalizationDraft(Base):
     )
     template_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     mailbox_id: Mapped[str | None] = mapped_column(ForeignKey("mail_accounts.id"))
+    recipient_email: Mapped[str | None] = mapped_column(String(320))
     command_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     request_key: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="preparing", index=True)
@@ -558,6 +598,7 @@ class SheetPersonalizationDraft(Base):
     html_snapshot: Mapped[str | None] = mapped_column(Text)
     sent_html_snapshot: Mapped[str | None] = mapped_column(Text)
     sent_text_snapshot: Mapped[str | None] = mapped_column(Text)
+    attachments_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     facts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     delivery_id: Mapped[str | None] = mapped_column(ForeignKey("email_deliveries.id", ondelete="SET NULL"), unique=True)
     error: Mapped[str | None] = mapped_column(Text)

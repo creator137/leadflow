@@ -6,7 +6,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
@@ -17,16 +17,16 @@ from app.config import get_settings, validate_production_secrets
 from app.db import SessionLocal, get_db
 from app.models import (
     AIConfig, Campaign, Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord,
-    Direction, DirectionProposalTemplate, DirectionRun, EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun,
+    Direction, DirectionAttachment, DirectionProposalTemplate, DirectionRun, EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun,
     MailAccount, ParserRun, PhraseSearchResult, PhraseSearchRun, SheetPersonalizationDraft, SheetRowMapping, SourceJob, Suppression, TrackedLink,
 )
 from app.schemas import (
     AIConfigCreate, AIConfigRead, CampaignCreate, CampaignRead, CampaignUpdate, CompanyRead, CompanyUpdate,
-    DeliveryRead, DirectionCreate, DirectionRead, DirectionRunRead, DirectionUpdate, EmailTemplateCreate,
+    DeliveryRead, DirectionCreate, DirectionRead, DirectionRunRead, DirectionUpdate, DirectionWizardCreate, EmailTemplateCreate,
     EmailTemplateRead, EmailTemplateUpdate, GoogleSheetsConfigCreate, GoogleSheetsConfigRead, MailAccountCreate,
     MailAccountRead, MailAccountUpdate, ManualSendCreate, ParserRunRead, SuppressionCreate, TemplatePreview, TemplateTestSend,
     AISettingsUpdate, PersonalizationPreviewCreate, PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead,
-    ProposalDraftCreate, ProposalDraftUpdate, ProposalTemplateUpdate, ProposalTestSend,
+    ProposalDraftCreate, ProposalDraftUpdate, ProposalTemplateUpdate, ProposalTestSend, SenderSettingsUpdate,
     SheetActionRequest, SourceJobCreate, SourceJobRead, SourceJobUpdate,
 )
 from app.services.collection import execute_job
@@ -37,15 +37,20 @@ from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.data_quality import backfill_structured_business_fields
 from app.services.directions import archive_direction, create_direction, serialize_direction, update_direction
 from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_config, sync_companies, worksheet_from_config
-from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, execute_campaign, process_queue, render_template_parts, send_delivery
+from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, execute_campaign, process_queue, render_template_parts, sender_template_context, send_delivery
 from app.services.deepseek import DeepSeekClient, DeepSeekError, ai_settings as get_ai_settings
 from app.services.personalized import PersonalizationFragments, prepare_personalization, send_personalized
 from app.services.sheet_personalization import send_sheet_draft, serialize_draft
 from app.services.sheet_actions import execute_sheet_action
 from app.services.proposals import (
-    ensure_all_proposal_templates, finalize_proposal_delivery, prepare_proposal_draft, render_proposal,
+    ensure_all_proposal_templates, ensure_direction_email_template, ensure_proposal_template, finalize_proposal_delivery, get_sender_settings, prepare_proposal_draft, render_proposal,
     send_proposal_draft, serialize_proposal_template, update_proposal_draft,
 )
+from app.services.admin_self_service import (
+    create_direction_bundle, delivery_timeline, email_journal, serialize_campaign, serialize_sender,
+    update_sender_settings,
+)
+from app.services.attachments import attachment_dict, attachment_path, save_attachment
 from app.services.sheet_personalization import _default_mailbox
 from app.services.secrets import decrypt_secret, encrypt_secret
 from app.services.provenance import apply_field
@@ -243,10 +248,25 @@ def directions(include_archived: bool = False, session: Session = Depends(get_db
 def add_direction(payload: DirectionCreate, session: Session = Depends(get_db)) -> DirectionRead:
     try:
         direction = create_direction(session, payload)
+        ensure_proposal_template(session, direction)
+        ensure_direction_email_template(session, direction)
+        session.commit()
     except IntegrityError as exc:
         session.rollback()
         raise HTTPException(409, "Direction name or Google Sheet tab already exists") from exc
     return serialize_direction(session, direction)
+
+
+@app.post("/api/directions/wizard", status_code=201)
+def add_direction_wizard(payload: DirectionWizardCreate, session: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return create_direction_bundle(session, payload)
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "Направление или вкладка Google Таблицы с таким названием уже существует.") from exc
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.patch("/api/directions/{direction_id}", response_model=DirectionRead)
@@ -268,6 +288,47 @@ def remove_direction(direction_id: str, session: Session = Depends(get_db)) -> R
     if not direction:
         raise HTTPException(404, "Direction not found")
     archive_direction(session, direction)
+    return Response(status_code=204)
+
+
+@app.get("/api/directions/{direction_id}/attachments")
+def direction_attachments(direction_id: str, session: Session = Depends(get_db)) -> list[dict[str, object]]:
+    if not session.get(Direction, direction_id):
+        raise HTTPException(404, "Направление не найдено.")
+    return [attachment_dict(row) for row in session.scalars(select(DirectionAttachment).where(
+        DirectionAttachment.direction_id == direction_id, DirectionAttachment.active.is_(True),
+    ).order_by(DirectionAttachment.created_at))]
+
+
+@app.post("/api/directions/{direction_id}/attachments", status_code=201)
+async def upload_direction_attachment(
+    direction_id: str, file: UploadFile = File(...), session: Session = Depends(get_db),
+) -> dict[str, object]:
+    if not session.get(Direction, direction_id):
+        raise HTTPException(404, "Направление не найдено.")
+    try:
+        return attachment_dict(await save_attachment(session, get_settings(), direction_id, file))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/direction-attachments/{attachment_id}/download")
+def download_direction_attachment(attachment_id: str, session: Session = Depends(get_db)) -> FileResponse:
+    row = session.get(DirectionAttachment, attachment_id)
+    if not row:
+        raise HTTPException(404, "Файл не найден.")
+    path = attachment_path(get_settings(), row.storage_name)
+    if not path.is_file():
+        raise HTTPException(404, "Файл не найден в хранилище.")
+    return FileResponse(path, media_type=row.content_type, filename=row.filename)
+
+
+@app.delete("/api/direction-attachments/{attachment_id}", status_code=204)
+def archive_direction_attachment(attachment_id: str, session: Session = Depends(get_db)) -> Response:
+    row = session.get(DirectionAttachment, attachment_id)
+    if not row:
+        raise HTTPException(404, "Файл не найден.")
+    row.active = False; session.commit()
     return Response(status_code=204)
 
 
@@ -609,7 +670,7 @@ def delete_template(template_id: str, session: Session = Depends(get_db)) -> Res
 def preview_template(template_id: str, payload: TemplatePreview, session: Session = Depends(get_db)) -> dict[str, str]:
     template, company = session.get(EmailTemplate, template_id), session.get(Company, payload.company_id)
     if not template or not company: raise HTTPException(404, "Template or company not found")
-    subject, html, text = render_template_parts(template, company)
+    subject, html, text = render_template_parts(template, company, sender_template_context(session))
     return {"subject": subject, "html_body": html, "text_body": text}
 
 
@@ -710,6 +771,9 @@ def preview_proposal_draft(draft_id: str, session: Session = Depends(get_db)) ->
     company = session.get(Company, draft.company_id) if draft else None
     if not draft or not company:
         raise HTTPException(404, "Черновик КП не найден.")
+    if draft.status == "sent" and draft.sent_html_snapshot:
+        return {"subject": draft.subject or "", "html_body": draft.sent_html_snapshot,
+                "text_body": draft.sent_text_snapshot or ""}
     return render_proposal(draft, company, get_settings())
 
 
@@ -719,7 +783,8 @@ def proposal_preview_page(draft_id: str, session: Session = Depends(get_db)) -> 
     company = session.get(Company, draft.company_id) if draft else None
     if not draft or not company:
         raise HTTPException(404, "Черновик КП не найден.")
-    return HTMLResponse(render_proposal(draft, company, get_settings())["html_body"])
+    return HTMLResponse(draft.sent_html_snapshot if draft.status == "sent" and draft.sent_html_snapshot
+                        else render_proposal(draft, company, get_settings())["html_body"])
 
 
 @app.post("/api/proposal-drafts/{draft_id}/test-send", response_model=DeliveryRead)
@@ -756,45 +821,55 @@ def confirm_send_proposal(draft_id: str, session: Session = Depends(get_db)) -> 
         raise HTTPException(409, human_error(exc)) from exc
 
 
-@app.get("/api/campaigns", response_model=list[CampaignRead])
-def campaigns(session: Session = Depends(get_db)) -> list[Campaign]:
-    return list(session.scalars(select(Campaign).order_by(Campaign.created_at.desc())))
+@app.get("/api/campaigns")
+def campaigns(session: Session = Depends(get_db)) -> list[dict[str, object]]:
+    return [serialize_campaign(session, row) for row in session.scalars(select(Campaign).order_by(Campaign.created_at.desc()))]
 
 
-@app.post("/api/campaigns", response_model=CampaignRead, status_code=201)
-def create_campaign(payload: CampaignCreate, session: Session = Depends(get_db)) -> Campaign:
+@app.post("/api/campaigns", status_code=201)
+def create_campaign(payload: CampaignCreate, session: Session = Depends(get_db)) -> dict[str, object]:
     if not session.get(MailAccount, payload.mailbox_id) or not session.get(EmailTemplate, payload.template_id):
-        raise HTTPException(400, "Unknown mailbox or template")
+        raise HTTPException(400, "Выберите направление, шаблон и почтовый ящик.")
+    template = session.get(EmailTemplate, payload.template_id)
+    if payload.direction_id and template.direction_id != payload.direction_id:
+        raise HTTPException(409, "Выбранный шаблон относится к другому направлению.")
     campaign = Campaign(**payload.model_dump())
     session.add(campaign)
     session.commit()
     session.refresh(campaign)
-    return campaign
+    return serialize_campaign(session, campaign)
 
 
-@app.patch("/api/campaigns/{campaign_id}", response_model=CampaignRead)
-def update_campaign(campaign_id: str, payload: CampaignUpdate, session: Session = Depends(get_db)) -> Campaign:
+@app.patch("/api/campaigns/{campaign_id}")
+def update_campaign(campaign_id: str, payload: CampaignUpdate, session: Session = Depends(get_db)) -> dict[str, object]:
     campaign = session.get(Campaign, campaign_id)
     if not campaign:
-        raise HTTPException(404, "Campaign not found")
+        raise HTTPException(404, "Автоматическая рассылка не найдена.")
     values = payload.model_dump(exclude_unset=True)
     mailbox_id = values.get("mailbox_id", campaign.mailbox_id)
     template_id = values.get("template_id", campaign.template_id)
     if not session.get(MailAccount, mailbox_id) or not session.get(EmailTemplate, template_id):
-        raise HTTPException(400, "Unknown mailbox or template")
+        raise HTTPException(400, "Выберите существующий шаблон и почтовый ящик.")
+    direction_id = values.get("direction_id", campaign.direction_id)
+    template = session.get(EmailTemplate, template_id)
+    if direction_id and template.direction_id != direction_id:
+        raise HTTPException(409, "Выбранный шаблон относится к другому направлению.")
     for key, value in values.items():
         setattr(campaign, key, value)
     session.commit()
     session.refresh(campaign)
-    return campaign
+    return serialize_campaign(session, campaign)
 
 
 @app.post("/api/campaigns/{campaign_id}/run")
 def run_campaign(campaign_id: str, session: Session = Depends(get_db)) -> dict[str, int]:
     campaign = session.get(Campaign, campaign_id)
     if not campaign:
-        raise HTTPException(404, "Campaign not found")
-    return execute_campaign(session, campaign, get_settings())
+        raise HTTPException(404, "Автоматическая рассылка не найдена.")
+    try:
+        return execute_campaign(session, campaign, get_settings())
+    except ValueError as exc:
+        raise HTTPException(409, human_error(exc)) from exc
 
 
 @app.post("/api/campaigns/{campaign_id}/pause", response_model=CampaignRead)
@@ -811,6 +886,45 @@ def resume_campaign(campaign_id: str, session: Session = Depends(get_db)) -> Cam
     campaign.status, campaign.active = "running", True; session.commit(); session.refresh(campaign); return campaign
 
 
+@app.get("/api/campaigns/{campaign_id}/history")
+def campaign_history(campaign_id: str, session: Session = Depends(get_db)) -> list[dict[str, object]]:
+    if not session.get(Campaign, campaign_id):
+        raise HTTPException(404, "Автоматическая рассылка не найдена.")
+    return [{
+        "id": row.id, "company_id": row.company_id, "recipient_email": row.recipient_email,
+        "subject": row.subject, "status": row.status, "created_at": row.created_at, "sent_at": row.sent_at,
+    } for row in session.scalars(select(EmailDelivery).where(
+        EmailDelivery.campaign_id == campaign_id,
+    ).order_by(EmailDelivery.created_at.desc()).limit(500))]
+
+
+@app.get("/api/sender-settings")
+def sender_settings(session: Session = Depends(get_db)) -> dict[str, object]:
+    row = get_sender_settings(session); session.commit()
+    return serialize_sender(row)
+
+
+@app.patch("/api/sender-settings")
+def save_sender_settings(payload: SenderSettingsUpdate, session: Session = Depends(get_db)) -> dict[str, object]:
+    return serialize_sender(update_sender_settings(session, payload.model_dump()))
+
+
+@app.get("/api/email-journal")
+def get_email_journal(
+    search: str | None = None, direction_id: str | None = None, status_filter: str | None = None,
+    mailbox_id: str | None = None, item_type: str | None = None, days: int | None = Query(None, ge=1, le=3650), session: Session = Depends(get_db),
+) -> list[dict[str, object]]:
+    return email_journal(session, search=search, direction_id=direction_id, status=status_filter,
+                         mailbox_id=mailbox_id, item_type=item_type, days=days)
+
+
+@app.get("/api/deliveries/{delivery_id}/timeline")
+def get_delivery_timeline(delivery_id: str, session: Session = Depends(get_db)) -> list[dict[str, object]]:
+    if not session.get(EmailDelivery, delivery_id):
+        raise HTTPException(404, "Письмо не найдено.")
+    return delivery_timeline(session, delivery_id)
+
+
 @app.get("/api/deliveries", response_model=list[DeliveryRead])
 def deliveries(status_filter: str | None = None, mailbox: str | None = None, template: str | None = None, limit: int = Query(100, ge=1, le=1000), session: Session = Depends(get_db)) -> list[EmailDelivery]:
     query = select(EmailDelivery).order_by(EmailDelivery.created_at.desc()).limit(limit)
@@ -821,7 +935,7 @@ def deliveries(status_filter: str | None = None, mailbox: str | None = None, tem
 
 
 @app.get("/api/deliveries/{delivery_id}/preview")
-def delivery_preview(delivery_id: str, session: Session = Depends(get_db)) -> dict[str, str]:
+def delivery_preview(delivery_id: str, session: Session = Depends(get_db)) -> dict[str, object]:
     delivery = session.get(EmailDelivery, delivery_id)
     if not delivery:
         raise HTTPException(404, "Письмо не найдено.")
@@ -829,6 +943,7 @@ def delivery_preview(delivery_id: str, session: Session = Depends(get_db)) -> di
         "subject": delivery.subject,
         "html_body": delivery.html_body,
         "text_body": delivery.text_body or "",
+        "attachments": delivery.attachments_snapshot or [],
     }
 
 
