@@ -378,6 +378,7 @@ class EmailDelivery(Base):
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     tracking_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     unsubscribe_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    unsubscribe_url: Mapped[str | None] = mapped_column(Text)
     provider_message_id: Mapped[str | None] = mapped_column(String(998))
     message_id: Mapped[str | None] = mapped_column(String(998), unique=True)
     in_reply_to: Mapped[str | None] = mapped_column(String(998))

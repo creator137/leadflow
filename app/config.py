@@ -1,4 +1,6 @@
 from functools import lru_cache
+from ipaddress import ip_address
+from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -9,6 +11,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://leadflow:leadflow@localhost:5432/leadflow"
     app_environment: str = "development"
     public_base_url: str = "http://localhost:8000"
+    email_open_tracking_enabled: bool = False
+    email_click_tracking_enabled: bool = False
     secret_key: str = "development-only-change-me"
     chrome_binary: str | None = None
     source_max_scan: int = 500
@@ -45,3 +49,32 @@ def validate_production_secrets(settings: Settings) -> None:
         raise RuntimeError("ADMIN_PASSWORD must be changed for production")
     if settings.secret_key == "development-only-change-me" or len(settings.secret_key) < 32:
         raise RuntimeError("SECRET_KEY must be a unique value of at least 32 characters for production")
+    if not is_public_https_url(settings.public_base_url):
+        raise RuntimeError("PUBLIC_BASE_URL must be a public HTTPS URL in production")
+
+
+def is_public_https_url(value: str) -> bool:
+    """Return whether a URL is suitable for links placed into outbound email."""
+    parsed = urlparse(value.strip())
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
+        return False
+    if hostname == "localhost" or hostname.endswith((".localhost", ".local", ".test", ".invalid")):
+        return False
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        return "." in hostname
+    return not (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved)
+
+
+def is_branded_https_url(value: str) -> bool:
+    """Return whether a URL has a DNS hostname suitable for recipient-facing links."""
+    if not is_public_https_url(value):
+        return False
+    hostname = (urlparse(value.strip()).hostname or "").casefold().rstrip(".")
+    try:
+        ip_address(hostname)
+    except ValueError:
+        return True
+    return False

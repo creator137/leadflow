@@ -946,8 +946,7 @@ def tracking_click(token: str, session: Session = Depends(get_db)) -> RedirectRe
     return RedirectResponse(link.target_url, status_code=302)
 
 
-@app.get("/unsubscribe/{token}", response_class=HTMLResponse, include_in_schema=False)
-def unsubscribe(token: str, session: Session = Depends(get_db)) -> str:
+def _unsubscribe_delivery(token: str, session: Session) -> tuple[EmailDelivery, bool]:
     delivery = session.scalar(select(EmailDelivery).where(EmailDelivery.unsubscribe_token == token))
     if not delivery:
         raise HTTPException(404, "Delivery not found")
@@ -960,7 +959,19 @@ def unsubscribe(token: str, session: Session = Depends(get_db)) -> str:
     session.commit()
     if first_unsubscribe:
         sync_email_event_to_sheets(session, delivery)
+    return delivery, first_unsubscribe
+
+
+@app.get("/unsubscribe/{token}", response_class=HTMLResponse, include_in_schema=False)
+def unsubscribe(token: str, session: Session = Depends(get_db)) -> str:
+    _unsubscribe_delivery(token, session)
     return "<h1>Вы отписаны</h1><p>На этот адрес больше не будут отправляться письма.</p>"
+
+
+@app.post("/unsubscribe/{token}", include_in_schema=False)
+def unsubscribe_one_click(token: str, session: Session = Depends(get_db)) -> Response:
+    _unsubscribe_delivery(token, session)
+    return Response(status_code=200)
 
 
 @app.get("/api/google-sheets", response_model=list[GoogleSheetsConfigRead])

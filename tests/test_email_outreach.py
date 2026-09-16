@@ -63,14 +63,54 @@ def test_campaign_queue_is_direction_limited_and_idempotent(db: Session) -> None
     direction, _, account, template = setup(db)
     campaign = Campaign(name="Кафе", direction_id=direction.id, mailbox_id=account.id, template_id=template.id, daily_limit=5, run_limit=5, sending_interval_seconds=10, cooldown_days=30, status="running", active=True)
     db.add(campaign); db.commit()
-    first = queue_campaign(db, campaign, Settings(public_base_url="https://lead.test"))
-    second = queue_campaign(db, campaign, Settings(public_base_url="https://lead.test"))
+    settings = Settings(
+        public_base_url="https://lead.example.com",
+        email_open_tracking_enabled=True,
+        email_click_tracking_enabled=True,
+    )
+    first = queue_campaign(db, campaign, settings)
+    second = queue_campaign(db, campaign, settings)
     assert first["queued"] == 1 and second["queued"] == 0
     delivery = db.scalar(select(EmailDelivery))
     assert delivery and delivery.direction_id == direction.id and delivery.status == "queued"
     assert len(delivery.tracking_token) >= 32 and len(delivery.unsubscribe_token) >= 32
     assert "/unsubscribe/" in delivery.html_body and "/t/open/" in delivery.html_body
     assert db.scalar(select(TrackedLink)) is not None
+
+
+def test_deliverability_defaults_keep_direct_links_and_add_unsubscribe_headers(db: Session) -> None:
+    _, company, account, template = setup(db)
+    delivery = build_delivery(db, company, account, template, Settings(public_base_url="https://lead.example.com"))
+    delivery.message_id = "<test@example.test>"
+    message = build_email_message(delivery, account)
+
+    assert 'href="https://example.org/a"' in delivery.html_body
+    assert "/t/open/" not in delivery.html_body
+    assert db.scalar(select(TrackedLink)) is None
+    assert delivery.unsubscribe_url in delivery.html_body
+    assert delivery.unsubscribe_url in delivery.text_body
+    assert message["Date"]
+    assert message["List-Unsubscribe"] == f"<{delivery.unsubscribe_url}>"
+    assert message["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+
+
+def test_ip_origin_disables_tracking_and_uses_mailto_unsubscribe(db: Session) -> None:
+    _, company, account, template = setup(db)
+    company.email = company.company_email = "client@example.com"
+    db.commit()
+    delivery = build_delivery(db, company, account, template, Settings(
+        public_base_url="https://159.194.253.61",
+        email_open_tracking_enabled=True,
+        email_click_tracking_enabled=True,
+    ))
+    delivery.message_id = "<test@example.test>"
+    message = build_email_message(delivery, account)
+    assert 'href="https://example.org/a"' in delivery.html_body
+    assert "159.194.253.61" not in delivery.html_body
+    assert "/t/open/" not in delivery.html_body
+    assert delivery.unsubscribe_url.startswith("mailto:")
+    assert message["List-Unsubscribe"] == f"<{delivery.unsubscribe_url}>"
+    assert message["List-Unsubscribe-Post"] is None
 
 
 def test_suppression_checked_before_queue(db: Session) -> None:
@@ -172,4 +212,9 @@ def test_smtp_diagnostics_separate_connection_and_auth(db: Session, monkeypatch)
 def test_production_rejects_default_secrets() -> None:
     with pytest.raises(RuntimeError):
         validate_production_secrets(Settings(app_environment="production", admin_password="change-me-before-production"))
-    validate_production_secrets(Settings(app_environment="production", admin_password="unique-admin-password", secret_key="x" * 40))
+    with pytest.raises(RuntimeError, match="PUBLIC_BASE_URL"):
+        validate_production_secrets(Settings(app_environment="production", admin_password="unique-admin-password", secret_key="x" * 40))
+    validate_production_secrets(Settings(
+        app_environment="production", admin_password="unique-admin-password", secret_key="x" * 40,
+        public_base_url="https://leadflow.example.com",
+    ))

@@ -54,8 +54,14 @@ docker compose up -d
 ```
 
 Set unique `SECRET_KEY` and `ADMIN_PASSWORD` values before exposing the service.
-Tracking and unsubscribe URLs use `PUBLIC_BASE_URL`, so it must be externally
-reachable by recipients. Schedules use five-field cron expressions in UTC.
+Unsubscribe URLs use `PUBLIC_BASE_URL`. In production it must be a public HTTPS
+origin; startup and send-time checks reject localhost, private addresses, and
+plain HTTP. Open-pixel and click-redirect tracking are disabled by default
+because they can reduce deliverability. They can be explicitly enabled with
+`EMAIL_OPEN_TRACKING_ENABLED=true` and `EMAIL_CLICK_TRACKING_ENABLED=true` after
+the sending domain has established a healthy reputation. Every outbound message
+contains matching HTML/text unsubscribe links plus RFC 8058 one-click headers.
+Schedules use five-field cron expressions in UTC.
 
 Create a parser job:
 

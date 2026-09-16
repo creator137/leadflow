@@ -7,17 +7,17 @@ import smtplib
 import socket
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from email.utils import formataddr, make_msgid
+from email.utils import format_datetime, formataddr, make_msgid
 from html import escape
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 from jinja2 import Environment, StrictUndefined, select_autoescape
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import Settings
+from app.config import Settings, is_branded_https_url, is_public_https_url
 from app.models import Campaign, Company, CompanyDirection, EmailDelivery, EmailTemplate, MailAccount, Suppression, TrackedLink
 from app.services.secrets import decrypt_secret
 from app.services.email_events import record_email_event, sync_email_event_to_sheets
@@ -66,15 +66,61 @@ def render_template(template: EmailTemplate, company: Company, extra: dict[str, 
     return subject, html
 
 
-def add_tracking(session: Session, delivery: EmailDelivery, html: str, settings: Settings) -> str:
+def _is_test_recipient(value: str) -> bool:
+    domain = value.rsplit("@", 1)[-1].casefold()
+    return domain == "example.test" or domain.endswith(".test")
+
+
+def _unsubscribe_url(delivery: EmailDelivery, settings: Settings, account: MailAccount) -> str:
+    if is_branded_https_url(settings.public_base_url):
+        return urljoin(settings.public_base_url.rstrip("/") + "/", f"unsubscribe/{delivery.unsubscribe_token}")
+    subject = quote("Отписаться от писем", safe="")
+    return f"mailto:{account.from_email}?subject={subject}"
+
+
+def add_tracking(session: Session, delivery: EmailDelivery, html: str, settings: Settings, account: MailAccount) -> str:
     def replace(match: re.Match[str]) -> str:
         token = secrets.token_urlsafe(32)
         session.add(TrackedLink(token=token, delivery_id=delivery.id, target_url=match.group(2)))
         return f'{match.group(1)}{urljoin(settings.public_base_url.rstrip("/") + "/", f"t/c/{token}")}{match.group(3)}'
-    html = HREF_RE.sub(replace, html)
-    pixel = urljoin(settings.public_base_url.rstrip("/") + "/", f"t/open/{delivery.tracking_token}.gif")
-    unsubscribe = urljoin(settings.public_base_url.rstrip("/") + "/", f"unsubscribe/{delivery.unsubscribe_token}")
-    return html + f'<img src="{escape(pixel)}" width="1" height="1" alt="" style="display:none">' + f'<p style="font-size:12px;color:#777"><a href="{escape(unsubscribe)}">Отписаться</a></p>'
+    branded_origin = is_branded_https_url(settings.public_base_url)
+    if settings.email_click_tracking_enabled and branded_origin:
+        html = HREF_RE.sub(replace, html)
+    if settings.email_open_tracking_enabled and branded_origin:
+        pixel = urljoin(settings.public_base_url.rstrip("/") + "/", f"t/open/{delivery.tracking_token}.gif")
+        html += f'<img src="{escape(pixel)}" width="1" height="1" alt="" style="display:none">'
+    delivery.unsubscribe_url = _unsubscribe_url(delivery, settings, account)
+    return html + (
+        f'<p style="font-size:12px;color:#777">'
+        f'<a href="{escape(delivery.unsubscribe_url)}" rel="nofollow">Отписаться от рассылки</a></p>'
+    )
+
+
+def add_text_unsubscribe(text: str, unsubscribe_url: str) -> str:
+    clean = text.rstrip()
+    suffix = f"Чтобы больше не получать письма, отпишитесь: {unsubscribe_url}"
+    return f"{clean}\n\n{suffix}" if clean else suffix
+
+
+def delivery_preflight_errors(delivery: EmailDelivery, account: MailAccount) -> list[str]:
+    errors: list[str] = []
+    if not delivery.subject.strip():
+        errors.append("Пустая тема письма")
+    if not delivery.text_body.strip():
+        errors.append("Отсутствует текстовая версия письма")
+    if not delivery.unsubscribe_url:
+        errors.append("Отсутствует ссылка отписки")
+    elif not (delivery.unsubscribe_url.startswith("mailto:") or is_public_https_url(delivery.unsubscribe_url)):
+        errors.append("Ссылка отписки должна вести на почту или публичный HTTPS-адрес")
+    combined = f"{delivery.html_body}\n{delivery.text_body}".casefold()
+    if not _is_test_recipient(delivery.recipient_email) and any(
+        marker in combined for marker in ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
+    ):
+        errors.append("Письмо содержит локальный или недоступный адрес")
+    if not account.from_name or "test" in account.from_name.casefold():
+        if not _is_test_recipient(delivery.recipient_email):
+            errors.append("Укажите реальное имя отправителя вместо тестового")
+    return errors
 
 
 def smtp_connection(account: MailAccount):
@@ -94,8 +140,13 @@ def imap_connection(account: MailAccount):
 def build_email_message(delivery: EmailDelivery, account: MailAccount) -> EmailMessage:
     message = EmailMessage()
     message["Subject"], message["From"], message["To"] = delivery.subject, formataddr((account.from_name or account.name, account.from_email)), delivery.recipient_email
+    message["Date"] = format_datetime(now_utc())
     if account.reply_to: message["Reply-To"] = account.reply_to
-    message["Message-ID"], message["X-LeadFlow-ID"] = delivery.message_id, delivery.id
+    message["Message-ID"] = delivery.message_id
+    if delivery.unsubscribe_url:
+        message["List-Unsubscribe"] = f"<{delivery.unsubscribe_url}>"
+        if urlparse(delivery.unsubscribe_url).scheme == "https":
+            message["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     if delivery.in_reply_to:
         message["In-Reply-To"] = delivery.in_reply_to
         message["References"] = delivery.in_reply_to
@@ -185,7 +236,8 @@ def build_delivery(session: Session, company: Company, account: MailAccount, tem
         idempotency_key=idempotency_key,
     )
     session.add(delivery); session.flush()
-    delivery.html_body = add_tracking(session, delivery, html, settings)
+    delivery.html_body = add_tracking(session, delivery, html, settings, account)
+    delivery.text_body = add_text_unsubscribe(delivery.text_body, delivery.unsubscribe_url or "")
     record_email_event(session, delivery, "queued", {"send_mode": send_mode})
     session.commit(); session.refresh(delivery)
     return delivery
@@ -252,6 +304,17 @@ def send_claimed_delivery(session: Session, delivery_id: str, worker_id: str) ->
         record_email_event(session, delivery, "send_error", {"attempt": delivery.attempt_count})
     else:
         message = build_email_message(delivery, account)
+        preflight_errors = delivery_preflight_errors(delivery, account)
+        if preflight_errors:
+            delivery.status = "send_error"
+            delivery.error = "; ".join(preflight_errors)
+            delivery.attempt_count = delivery.max_attempts
+            delivery.next_attempt_at = None
+            delivery.locked_at = delivery.locked_by = None
+            record_email_event(session, delivery, "send_error", {"reason": "deliverability_preflight"})
+            session.commit()
+            sync_email_event_to_sheets(session, delivery)
+            return delivery.status
         try:
             with smtp_connection(account) as smtp:
                 smtp.login(account.smtp_login, decrypt_secret(account.smtp_password_encrypted)); refused = smtp.send_message(message)
