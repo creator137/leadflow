@@ -282,9 +282,21 @@ def queue_campaign(session: Session, campaign: Campaign, settings: Settings) -> 
         ).order_by(EmailTemplate.created_at).limit(1))
     if not account or not account.active or not template or not template.active: raise ValueError("Campaign mailbox or template is inactive")
     today = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
-    used = session.scalar(select(func.count()).select_from(EmailDelivery).where(EmailDelivery.mailbox_id == account.id, EmailDelivery.sent_at >= today)) or 0
-    pending = session.scalar(select(func.count()).select_from(EmailDelivery).where(EmailDelivery.mailbox_id == account.id, EmailDelivery.status.in_(["queued", "sending"]))) or 0
-    limit = min(max(0, min(campaign.daily_limit, account.daily_limit) - used - pending), campaign.run_limit)
+    mailbox_used = session.scalar(select(func.count()).select_from(EmailDelivery).where(
+        EmailDelivery.mailbox_id == account.id, EmailDelivery.sent_at >= today,
+    )) or 0
+    mailbox_pending = session.scalar(select(func.count()).select_from(EmailDelivery).where(
+        EmailDelivery.mailbox_id == account.id, EmailDelivery.status.in_(["queued", "sending"]),
+    )) or 0
+    campaign_used = session.scalar(select(func.count()).select_from(EmailDelivery).where(
+        EmailDelivery.campaign_id == campaign.id, EmailDelivery.sent_at >= today,
+    )) or 0
+    campaign_pending = session.scalar(select(func.count()).select_from(EmailDelivery).where(
+        EmailDelivery.campaign_id == campaign.id, EmailDelivery.status.in_(["queued", "sending"]),
+    )) or 0
+    mailbox_remaining = max(0, account.daily_limit - mailbox_used - mailbox_pending)
+    campaign_remaining = max(0, campaign.daily_limit - campaign_used - campaign_pending)
+    limit = min(mailbox_remaining, campaign_remaining, campaign.run_limit)
     if not limit: return {"selected": 0, "queued": 0, "skipped": 0}
     email_value = func.coalesce(Company.decision_maker_email, Company.company_email, Company.email)
     query = select(Company).where(email_value.is_not(None), Company.manually_blocked.is_(False))

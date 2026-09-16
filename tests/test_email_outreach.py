@@ -1,4 +1,5 @@
 from email.message import EmailMessage
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -76,6 +77,24 @@ def test_campaign_queue_is_direction_limited_and_idempotent(db: Session) -> None
     assert len(delivery.tracking_token) >= 32 and len(delivery.unsubscribe_token) >= 32
     assert "/unsubscribe/" in delivery.html_body and "/t/open/" in delivery.html_body
     assert db.scalar(select(TrackedLink)) is not None
+
+
+def test_campaign_daily_limit_is_separate_from_mailbox_daily_usage(db: Session) -> None:
+    direction, company, account, template = setup(db)
+    manual = build_delivery(db, company, account, template, Settings(public_base_url="https://lead.example.com"))
+    manual.status = "sent"
+    manual.sent_at = datetime.now(timezone.utc)
+    campaign = Campaign(
+        name="Первое письмо кампании", direction_id=direction.id, mailbox_id=account.id,
+        template_id=template.id, daily_limit=1, run_limit=1, cooldown_days=0,
+        status="running", active=True,
+    )
+    db.add(campaign); db.commit()
+
+    result = queue_campaign(db, campaign, Settings(public_base_url="https://lead.example.com"))
+
+    assert result["queued"] == 1
+    assert db.scalar(select(EmailDelivery).where(EmailDelivery.campaign_id == campaign.id)) is not None
 
 
 def test_deliverability_defaults_keep_direct_links_and_add_unsubscribe_headers(db: Session) -> None:

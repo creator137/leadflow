@@ -13,6 +13,7 @@ PAGES = [
     "proposals", "mailboxes", "sender", "sheets", "analytics", "settings",
 ]
 VIEWPORTS = [(1920, 1080, "desktop"), (1366, 768, "laptop"), (390, 844, "mobile")]
+BASE_URL = os.getenv("BROWSER_BASE_URL", "http://127.0.0.1:8000/")
 
 
 def run() -> None:
@@ -24,12 +25,16 @@ def run() -> None:
                 viewport={"width": width, "height": height},
                 http_credentials={"username": os.getenv("ADMIN_USERNAME", ""), "password": os.getenv("ADMIN_PASSWORD", "")},
                 locale="ru-RU",
+                ignore_https_errors=True,
             )
             page = context.new_page()
             errors: list[str] = []
             page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
             page.on("pageerror", lambda error: errors.append(str(error)))
-            response = page.goto("http://127.0.0.1:8000/", wait_until="networkidle", timeout=60_000)
+            # The admin UI deliberately polls live statuses, so ``networkidle`` may
+            # never be reached even though the page is fully usable.  Wait for the
+            # DOM and the first business widget instead.
+            response = page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_selector("#homeMetrics .metric-card", timeout=30_000)
             for section in PAGES:
                 if width < 992:
