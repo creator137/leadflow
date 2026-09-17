@@ -320,7 +320,10 @@ def download_direction_attachment(attachment_id: str, session: Session = Depends
     path = attachment_path(get_settings(), row.storage_name)
     if not path.is_file():
         raise HTTPException(404, "Файл не найден в хранилище.")
-    return FileResponse(path, media_type=row.content_type, filename=row.filename)
+    return FileResponse(
+        path, media_type=row.content_type, filename=row.filename,
+        content_disposition_type="attachment", headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 @app.delete("/api/direction-attachments/{attachment_id}", status_code=204)

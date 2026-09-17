@@ -192,7 +192,7 @@ def test_direction_attachments_are_snapshotted_and_recipient_is_editable(tmp_pat
         result = create_direction_bundle(session, wizard_payload(mailbox.id))
         direction = session.get(Direction, result["direction"]["id"])
         settings = Settings(public_base_url="https://lead.test", attachment_storage_dir=str(tmp_path))
-        uploaded = UploadFile(filename="Презентация.pdf", file=BytesIO(b"%PDF-1.4 test presentation"))
+        uploaded = UploadFile(filename="Презентация.pdf", file=BytesIO(b"%PDF-1.4 test presentation\n%%EOF"))
         attachment = asyncio.run(save_attachment(session, settings, direction.id, uploaded))
         company = Company(source="manual", company_name="Получатель", company_email="old@example.test", normalized_name="получатель", raw_data={})
         session.add(company); session.flush(); session.add(CompanyDirection(company_id=company.id, direction_id=direction.id)); session.commit()
@@ -219,7 +219,7 @@ def test_attachment_validation_rejects_executable(tmp_path: Path) -> None:
         try:
             asyncio.run(save_attachment(session, Settings(attachment_storage_dir=str(tmp_path)), result["direction"]["id"], upload))
         except ValueError as exc:
-            assert "PDF" in str(exc)
+            assert str(exc) == "Формат файла не поддерживается."
         else:
             raise AssertionError("Executable attachment must be rejected")
         assert session.query(DirectionAttachment).count() == 0
