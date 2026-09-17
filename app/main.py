@@ -1188,7 +1188,9 @@ def sheets_status(session: Session = Depends(get_db)) -> dict[str, object]:
 def test_sheets_connection(session: Session = Depends(get_db)) -> dict[str, object]:
     config = _active_sheets_config(session)
     if not config: raise HTTPException(409, "Active Google Sheets configuration not found")
-    direction = session.scalar(select(Direction).where(Direction.archived_at.is_(None)).limit(1))
+    direction = session.scalar(select(Direction).where(
+        Direction.active.is_(True), Direction.archived_at.is_(None),
+    ).limit(1))
     if not direction: raise HTTPException(409, "No Direction is configured")
     try:
         worksheet = worksheet_from_config(config, direction.sheet_tab)

@@ -343,7 +343,7 @@ def _parse_manual(field_name: str, value: str) -> Any:
     return value
 
 
-def worksheet_from_config(config: GoogleSheetsConfig, sheet_tab: str):
+def worksheet_from_config(config: GoogleSheetsConfig, sheet_tab: str, *, create_if_missing: bool = False):
     info = json.loads(decrypt_secret(config.credentials_encrypted))
     credentials = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
     client = gspread.authorize(credentials)
@@ -352,6 +352,8 @@ def worksheet_from_config(config: GoogleSheetsConfig, sheet_tab: str):
     try:
         return spreadsheet.worksheet(sheet_tab)
     except gspread.WorksheetNotFound:
+        if not create_if_missing:
+            raise
         worksheet = spreadsheet.add_worksheet(title=sheet_tab, rows=1000, cols=len(SHARED_SHEET_HEADERS))
         worksheet.update(range_name=f"A1:{_column_letter(len(SHARED_SHEET_HEADERS))}1", values=[list(SHARED_SHEET_HEADERS)])
         return worksheet
@@ -372,7 +374,11 @@ class GoogleSheetsSyncService:
         self.session, self.config = session, config
 
     def sync_direction(self, direction: Direction, *, worksheet=None) -> dict[str, int]:
-        worksheet = worksheet or _retry(lambda: worksheet_from_config(self.config, direction.sheet_tab))
+        if worksheet is None and (not direction.active or direction.archived_at):
+            raise ValueError("Приостановленное направление не синхронизируется.")
+        worksheet = worksheet or _retry(lambda: worksheet_from_config(
+            self.config, direction.sheet_tab, create_if_missing=True,
+        ))
         rows = _retry(worksheet.get_all_values)
         if not rows or not any(any(cell.strip() for cell in row) for row in rows):
             _retry(lambda: worksheet.update(range_name=f"A1:{_column_letter(len(SHARED_SHEET_HEADERS))}1", values=[list(SHARED_SHEET_HEADERS)]))

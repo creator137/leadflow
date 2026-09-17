@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -288,6 +289,17 @@ def test_global_sync_skips_paused_and_archived_directions(monkeypatch) -> None:
         monkeypatch.setattr(GoogleSheetsSyncService, "sync_direction", fake_sync)
         sync_companies(session, config)
         assert called == ["Активное"]
+
+
+def test_direct_sync_rejects_paused_direction() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        config = GoogleSheetsConfig(spreadsheet_id="sheet", worksheet_name="unused", credentials_encrypted="unused")
+        paused = Direction(name="Пауза", slug="paused", sheet_tab="Пауза", active=False)
+        session.add_all([config, paused]); session.commit()
+        with pytest.raises(ValueError, match="Приостановленное"):
+            GoogleSheetsSyncService(session, config).sync_direction(paused)
 
 
 def test_transient_google_error_is_retried(monkeypatch) -> None:
