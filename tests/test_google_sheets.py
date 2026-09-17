@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -5,7 +7,7 @@ from app.db import Base
 from app.models import Company, CompanyDirection, CompanyFieldProvenance, Direction, EmailDelivery, EmailTemplate, GoogleSheetsConfig, MailAccount, SheetRowMapping
 from app.services.google_sheets import (
     BUSINESS_COLUMNS, COLUMNS, HEADERS, SHARED_SHEET_HEADERS, GoogleSheetsSyncService, _retry,
-    discover_schema, standardize_business_columns, sync_delivery_tracking_to_sheet,
+    discover_schema, standardize_business_columns, sync_companies, sync_delivery_tracking_to_sheet,
 )
 from app.services.provenance import apply_field
 
@@ -237,12 +239,18 @@ def test_all_email_tracking_states_and_metadata_update_same_row() -> None:
             "opened": "Открыто", "clicked": "Перешли по ссылке", "replied": "Получен ответ",
             "unsubscribed": "Отписались",
         }
+        interaction = {
+            "sent": "Ожидаем ответ", "send_error": "Требуется проверка",
+            "bounced": "Требуется проверка", "opened": "Ожидаем ответ",
+            "clicked": "Ожидаем ответ", "replied": "Получен ответ",
+            "unsubscribed": "Отписались",
+        }
         for status, russian in expected.items():
             delivery.status = status; session.commit()
             assert sync_delivery_tracking_to_sheet(session, delivery, worksheet=worksheet)
             header, row = worksheet.rows[0], worksheet.rows[1]
             assert row[header.index("Статус почтовых отправлений")] == russian
-            assert row[header.index("Состояние взаимодействия")] == russian
+            assert row[header.index("Состояние взаимодействия")] == interaction[status]
             assert row[header.index("Дата отправки")].startswith("2026-09-15T08:30")
             assert row[header.index("Шаблон письма")] == "КП — рестораны"
             assert row[header.index("Отправитель")] == "Основная почта"
@@ -261,6 +269,25 @@ def test_duplicate_leadflow_id_is_rejected() -> None:
         import pytest
         with pytest.raises(ValueError, match="Duplicate LeadFlow ID"):
             service.sync_direction(direction, worksheet=worksheet)
+
+
+def test_global_sync_skips_paused_and_archived_directions(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        config = GoogleSheetsConfig(spreadsheet_id="sheet", worksheet_name="unused", credentials_encrypted="unused")
+        active = Direction(name="Активное", slug="active", sheet_tab="Активное", active=True)
+        paused = Direction(name="Пауза", slug="paused", sheet_tab="Пауза", active=False)
+        archived = Direction(name="Архив", slug="archived", sheet_tab="Архив", active=True,
+                             archived_at=datetime.now(timezone.utc))
+        session.add_all([config, active, paused, archived]); session.commit()
+        called = []
+        def fake_sync(_service, direction, **_kwargs):
+            called.append(direction.name)
+            return {"imported": 0, "inserted": 0, "updated": 0, "total": 0}
+        monkeypatch.setattr(GoogleSheetsSyncService, "sync_direction", fake_sync)
+        sync_companies(session, config)
+        assert called == ["Активное"]
 
 
 def test_transient_google_error_is_retried(monkeypatch) -> None:

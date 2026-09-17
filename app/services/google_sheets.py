@@ -168,12 +168,24 @@ def _delivery_sheet_values(delivery: EmailDelivery | None, template: EmailTempla
     if not delivery:
         return {"status": "", "sent_at": "", "template": "", "mailbox": "", "interaction": ""}
     status = STATUS_RU.get(delivery.status, delivery.status)
+    interaction = {
+        "queued": "Подготовка к отправке",
+        "sending": "Подготовка к отправке",
+        "sent": "Ожидаем ответ",
+        "opened": "Ожидаем ответ",
+        "clicked": "Ожидаем ответ",
+        "replied": "Получен ответ",
+        "bounced": "Требуется проверка",
+        "failed": "Требуется проверка",
+        "send_error": "Требуется проверка",
+        "unsubscribed": "Отписались",
+    }.get(delivery.status, "Требуется проверка")
     return {
         "status": status,
         "sent_at": delivery.sent_at.isoformat() if delivery.sent_at else "",
         "template": template.name if template else "",
         "mailbox": mailbox.name if mailbox else "",
-        "interaction": status,
+        "interaction": interaction,
     }
 
 
@@ -573,7 +585,9 @@ def sync_delivery_tracking_to_sheet(
 def sync_companies(session: Session, config: GoogleSheetsConfig) -> dict[str, int]:
     totals = {"imported": 0, "inserted": 0, "updated": 0, "total": 0}
     service = GoogleSheetsSyncService(session, config)
-    for direction in session.scalars(select(Direction).where(Direction.archived_at.is_(None))):
+    for direction in session.scalars(select(Direction).where(
+        Direction.active.is_(True), Direction.archived_at.is_(None),
+    )):
         result = service.sync_direction(direction)
         for key in totals: totals[key] += result[key]
         # The command is read from the actual row by stable LeadFlow ID. It only

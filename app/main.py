@@ -145,9 +145,17 @@ def companies(
     offset: int = Query(0, ge=0),
     session: Session = Depends(get_db),
 ) -> list[Company]:
-    query = select(Company).order_by(Company.collected_at.desc()).limit(limit).offset(offset)
+    query = (
+        select(Company)
+        .join(CompanyDirection, CompanyDirection.company_id == Company.id)
+        .join(Direction, Direction.id == CompanyDirection.direction_id)
+        .where(Direction.active.is_(True), Direction.archived_at.is_(None))
+        .distinct()
+        .order_by(Company.collected_at.desc())
+        .limit(limit).offset(offset)
+    )
     if direction:
-        query = query.join(CompanyDirection).where(CompanyDirection.direction_id == direction)
+        query = query.where(CompanyDirection.direction_id == direction)
     if city:
         query = query.where(Company.city == city)
     if category:
@@ -1131,6 +1139,8 @@ def sync_direction_sheet(direction_id: str, session: Session = Depends(get_db)) 
     direction = session.get(Direction, direction_id)
     if not direction:
         raise HTTPException(404, "Direction not found")
+    if not direction.active or direction.archived_at:
+        raise HTTPException(409, "Приостановленное направление не синхронизируется.")
     config = _active_sheets_config(session)
     if not config:
         raise HTTPException(409, "Active Google Sheets configuration not found")
