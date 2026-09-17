@@ -19,6 +19,7 @@ from app.models import (
 from app.services.company_enrichment import WebsiteAnalysisService
 from app.services.deepseek import DeepSeekClient, DeepSeekError, ai_settings
 from app.services.mailing import build_delivery
+from app.services.recipients import resolve_recipient_email, valid_email
 from app.services.attachments import active_attachments
 
 
@@ -355,6 +356,9 @@ def prepare_proposal_draft(
     draft = session.scalar(select(SheetPersonalizationDraft).where(SheetPersonalizationDraft.command_key == command_key))
     if draft and draft.status in {"ready", "sent"} and not regenerate:
         return draft
+    resolved_recipient = (valid_email(draft.recipient_email) if draft else None) or resolve_recipient_email(company)
+    if not resolved_recipient:
+        raise ValueError("У компании не указан email для отправки")
     created = draft is None
     if not draft:
         draft = SheetPersonalizationDraft(
@@ -362,7 +366,7 @@ def prepare_proposal_draft(
             template_id=legacy_template.id, proposal_template_id=business_template.id,
             template_version=business_template.version, mailbox_id=mailbox.id if mailbox else None,
             command_key=command_key, status="preparing",
-            recipient_email=(company.decision_maker_email or company.company_email or company.email),
+            recipient_email=resolved_recipient,
             attachments_snapshot=active_attachments(session, direction.id),
         )
         session.add(draft)
@@ -398,7 +402,7 @@ def prepare_proposal_draft(
     draft.template_version = draft.template_version or business_template.version
     draft.request_key = request_key
     if not draft.recipient_email:
-        draft.recipient_email = company.decision_maker_email or company.company_email or company.email
+        draft.recipient_email = resolved_recipient
     if not draft.attachments_snapshot:
         draft.attachments_snapshot = active_attachments(session, direction.id)
     if created or not draft.subject:

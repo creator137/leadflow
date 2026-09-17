@@ -11,10 +11,10 @@ def human_error(exc: Exception | str) -> str:
     if isinstance(exc, imaplib.IMAP4.error):
         return "Не удалось проверить входящие письма."
     text = str(exc).casefold()
+    if "не указан email" in text or "no recipient email" in text:
+        return "У компании не указан email для отправки"
     if "suppressed" in text:
         return "На этот адрес запрещена отправка."
-    if "no recipient email" in text:
-        return "У компании не указан email."
     if "cooldown" in text or "already sent" in text:
         return "Этому получателю недавно уже отправляли письмо."
     if "mailbox daily limit" in text or "daily limit" in text:

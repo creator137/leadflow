@@ -22,6 +22,7 @@ from app.models import Campaign, Company, CompanyDirection, Direction, EmailDeli
 from app.services.secrets import decrypt_secret
 from app.services.email_events import record_email_event, sync_email_event_to_sheets
 from app.services.attachments import active_attachments, attachment_path
+from app.services.recipients import normalize_email, resolve_recipient_email, valid_email
 
 HREF_RE = re.compile(r'(<a\b[^>]*?\bhref=["\'])(https?://[^"\']+)(["\'])', re.I)
 INLINE_LOGO_RE = re.compile(r'https?://[^"\']+/email-assets/bogorodsky-pryanik-logo\.jpg', re.I)
@@ -31,10 +32,6 @@ template_env = Environment(autoescape=select_autoescape(["html", "xml"]), undefi
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def normalize_email(value: str) -> str:
-    return value.strip().casefold()
 
 
 def safe_mail_error(exc: Exception) -> str:
@@ -237,8 +234,8 @@ def build_delivery(session: Session, company: Company, account: MailAccount, tem
         existing = session.scalar(select(EmailDelivery).where(EmailDelivery.idempotency_key == idempotency_key))
         if existing:
             return existing
-    recipient = normalize_email(recipient_override or company.decision_maker_email or company.company_email or company.email or "")
-    if not recipient: raise ValueError("Company has no recipient email")
+    recipient = valid_email(recipient_override) if recipient_override is not None else resolve_recipient_email(company)
+    if not recipient: raise ValueError("У компании не указан email для отправки")
     if is_suppressed(session, recipient) or company.manually_blocked: raise ValueError("Recipient is suppressed")
     if mailbox_daily_limit_reached(session, account): raise ValueError("Mailbox daily limit reached")
     if campaign and session.scalar(select(EmailDelivery.id).where(EmailDelivery.campaign_id == campaign.id, EmailDelivery.company_id == company.id, EmailDelivery.recipient_email == recipient)):

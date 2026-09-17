@@ -131,6 +131,8 @@ def discover_schema(rows: list[list[str]]) -> SheetSchema:
         elif value == "лпр": fields.setdefault("decision_maker_name", index)
         elif value in {"сайт", "веб-сайт", "website"}: fields.setdefault("website", index)
         elif value == "инн": fields.setdefault("inn", index)
+        elif value in {"почта компании", "email компании", "e-mail компании"}: fields.setdefault("company_email", index)
+        elif value in {"почта лпр", "email лпр", "e-mail лпр"}: fields.setdefault("decision_maker_email", index)
         elif value == "почта": email_columns.append(index)
         elif value == "телефон": phone_columns.append(index)
         elif value == "действие": actions.append(index)
@@ -142,8 +144,10 @@ def discover_schema(rows: list[list[str]]) -> SheetSchema:
         elif value == "шаблон письма": email_template_column = index
         elif value in {"отправитель", "почтовый ящик"}: mailbox_column = index
         elif value == "состояние взаимодействия": interaction_column = index
-    if email_columns: fields["company_email"] = email_columns[0]
-    if len(email_columns) > 1: fields["decision_maker_email"] = email_columns[1]
+    if email_columns and "company_email" not in fields: fields["company_email"] = email_columns[0]
+    remaining_email_columns = [column for column in email_columns if column != fields.get("company_email")]
+    if remaining_email_columns and "decision_maker_email" not in fields:
+        fields["decision_maker_email"] = remaining_email_columns[0]
     if phone_columns: fields["company_phone"] = phone_columns[0]
     if len(phone_columns) > 1: fields["decision_maker_phone"] = phone_columns[1]
     if actions: fields["action"] = actions[0]

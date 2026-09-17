@@ -14,6 +14,7 @@ from app.models import (
     Campaign, Company, Direction, DirectionProposalTemplate, EmailDelivery, EmailEvent,
     EmailTemplate, MailAccount, SenderSettings, SheetPersonalizationDraft,
 )
+from app.services.recipients import resolve_recipient_email
 from app.schemas import DirectionWizardCreate
 from app.services.directions import create_direction, serialize_direction
 from app.services.proposals import ensure_direction_email_template, ensure_proposal_template, get_sender_settings
@@ -164,7 +165,7 @@ def email_journal(
                 "key": f"draft:{draft.id}", "kind": "proposal", "kind_label": "Персональное КП",
                 "draft_id": draft.id, "delivery_id": draft.delivery_id, "company_id": company.id,
                 "company": company.company_name, "direction_id": direction.id, "direction": direction.name,
-                "recipient_email": (delivery.recipient_email if delivery else (company.decision_maker_email or company.company_email or company.email)),
+                "recipient_email": (delivery.recipient_email if delivery else resolve_recipient_email(company)),
                 "subject": draft.subject or "Без темы", "mailbox_id": draft.mailbox_id,
                 "mailbox": mailbox.name if mailbox else "—", "status": draft_status,
                 "status_label": STATUS_RU.get(draft_status, draft_status), "created_at": draft.created_at,

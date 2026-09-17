@@ -46,7 +46,7 @@ def _write(worksheet: Any, row: int, status_column: int, preview_column: int, st
 def _friendly(exc: Exception) -> str:
     text = str(exc).casefold()
     if "website" in text or "сайт" in text: return "Не указан сайт"
-    if "recipient" in text or "email" in text: return "Не найден email"
+    if "recipient" in text or "email" in text: return "У компании не указан email для отправки"
     if "daily limit" in text or "дневн" in text: return "Достигнут дневной лимит"
     if "mailbox" in text or "почтов" in text: return "Почтовый ящик недоступен"
     if "suppres" in text or "запрет" in text: return "Для этого адреса действует запрет отправки"
