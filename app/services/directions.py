@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from app.models import Direction, DirectionLocation, DirectionSearchQuery, DirectionSource
 from app.schemas import DirectionCreate, DirectionRead, DirectionUpdate
 
+DEFAULT_DIRECTION_SCHEDULE = "0 5 * * *"
+
 
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zа-яё0-9]+", "-", value.casefold(), flags=re.IGNORECASE).strip("-")
@@ -46,6 +48,7 @@ def _unique_slug(session: Session, name: str, direction_id: str | None = None) -
 
 
 def replace_children(session: Session, direction: Direction, payload: DirectionCreate | DirectionUpdate) -> None:
+    search_changed = any(getattr(payload, field) is not None for field in ("queries", "locations", "sources"))
     if payload.queries is not None:
         session.execute(delete(DirectionSearchQuery).where(DirectionSearchQuery.direction_id == direction.id))
         session.add_all(DirectionSearchQuery(direction_id=direction.id, **item.model_dump()) for item in payload.queries)
@@ -55,10 +58,14 @@ def replace_children(session: Session, direction: Direction, payload: DirectionC
     if payload.sources is not None:
         session.execute(delete(DirectionSource).where(DirectionSource.direction_id == direction.id))
         session.add_all(DirectionSource(direction_id=direction.id, source=source) for source in dict.fromkeys(payload.sources))
+    if search_changed:
+        direction.search_cursor = {}
 
 
 def create_direction(session: Session, payload: DirectionCreate, *, commit: bool = True) -> Direction:
     values = payload.model_dump(exclude={"queries", "locations", "sources"})
+    if values.get("active", True) and not values.get("schedule"):
+        values["schedule"] = DEFAULT_DIRECTION_SCHEDULE
     direction = Direction(**values, slug=_unique_slug(session, payload.name))
     session.add(direction)
     session.flush()
@@ -73,6 +80,8 @@ def update_direction(session: Session, direction: Direction, payload: DirectionU
     values = payload.model_dump(exclude_unset=True, exclude={"queries", "locations", "sources"})
     for key, value in values.items():
         setattr(direction, key, value)
+    if direction.active and not direction.schedule:
+        direction.schedule = DEFAULT_DIRECTION_SCHEDULE
     if payload.name is not None:
         direction.slug = _unique_slug(session, payload.name, direction.id)
     replace_children(session, direction, payload)

@@ -83,9 +83,8 @@ def execute_direction(
         DirectionSource.direction_id == direction.id, DirectionSource.active.is_(True),
     ).order_by(DirectionSource.source)))
     combinations = [(location, query, source) for location in locations for query in queries for source in sources]
+    search_cursor = dict(direction.search_cursor or {})
     start_combo = int((run.checkpoint or {}).get("combo_index", 0))
-    resume_external_id = (run.checkpoint or {}).get("last_external_id")
-    resume_source_url = (run.checkpoint or {}).get("last_source_url")
     blocked = failed = 0
 
     for combo_index, (location, query, source) in enumerate(combinations):
@@ -94,10 +93,14 @@ def execute_direction(
         remaining = run.limit_new - run.inserted
         if remaining <= 0:
             break
+        cursor_key = f"{location.id}:{query.id}:{source.id}"
+        cursor_offset = max(0, int((search_cursor.get(cursor_key) or {}).get("offset", 0)))
+        scan_step = max(30, remaining * 5)
+        scan_limit = min(settings.source_max_scan, max(remaining, cursor_offset + scan_step))
         spec = SearchSpec(
             category=query.query,
             city=location.city,
-            limit=max(remaining, min(settings.source_max_scan, max(30, remaining * 5))),
+            limit=scan_limit,
             # A direction combines multiple queries/sources; the bounded list
             # search is preferable to the city-wide grid used by exhaustive
             # one-off Parser Core jobs.
@@ -106,18 +109,13 @@ def execute_direction(
         adapter = build_adapter(source.source, settings)
         inserted_before_combo = run.inserted
         combo_target = max(1, math.ceil(remaining / (len(combinations) - combo_index)))
-        resuming = combo_index == start_combo and bool(resume_external_id or resume_source_url)
         combo_completed = False
         combo_started = time.monotonic()
+        yielded = 0
+        stopped_early = False
         try:
-            for lead in adapter.collect(spec):
-                if resuming:
-                    reached = (
-                        (resume_external_id and lead.source_external_id == resume_external_id)
-                        or (resume_source_url and lead.source_url == resume_source_url)
-                    )
-                    if reached:
-                        resuming = False
+            for yielded, lead in enumerate(adapter.collect(spec), start=1):
+                if yielded <= cursor_offset:
                     continue
                 if not lead.company_name or lead.company_name == "Unknown name":
                     continue
@@ -125,20 +123,16 @@ def execute_direction(
                 result = upsert_lead(session, lead)
                 _parser_provenance(session, result.company, lead, location.region)
                 _source_record(session, result.company.id, lead, query.query, location.city)
-                association = session.scalar(select(CompanyDirection).where(
-                    CompanyDirection.company_id == result.company.id,
-                    CompanyDirection.direction_id == direction.id,
-                ))
-                if association:
-                    run.duplicates += 1
-                else:
+                if result.inserted:
                     session.add(CompanyDirection(company_id=result.company.id, direction_id=direction.id))
                     run.inserted += 1
+                else:
+                    run.duplicates += 1
                 session.add(SearchObservation(
                     run_id=run.id, direction_id=direction.id, company_id=result.company.id,
                     source=lead.source, query=query.query, city=location.city,
                     source_external_id=lead.source_external_id, source_url=lead.source_url,
-                    is_new=not bool(association), matched_by=result.matched_by,
+                    is_new=result.inserted, matched_by=result.matched_by,
                     has_phone=bool(lead.phone), has_email=bool(lead.email),
                     has_website=bool(lead.website), has_branches_count=lead.branches_count is not None,
                     duration_ms=int((time.monotonic() - combo_started) * 1000),
@@ -151,9 +145,22 @@ def execute_direction(
                     "city": location.city,
                     "source": source.source,
                 }
+                search_cursor[cursor_key] = {
+                    "offset": yielded,
+                    "last_external_id": lead.source_external_id,
+                    "last_source_url": lead.source_url,
+                }
+                direction.search_cursor = dict(search_cursor)
                 session.commit()
                 if run.inserted >= run.limit_new or run.inserted - inserted_before_combo >= combo_target:
+                    stopped_early = True
                     break
+            if not stopped_early:
+                # The current result window was exhausted. Start from the top
+                # on the next day so newly appeared high-ranking cards are not missed.
+                if yielded < scan_limit or yielded >= settings.source_max_scan:
+                    search_cursor[cursor_key] = {"offset": 0}
+                    direction.search_cursor = dict(search_cursor)
             combo_completed = run.inserted < run.limit_new
         except SourceBlocked as exc:
             session.rollback()

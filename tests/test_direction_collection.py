@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import Base
-from app.models import Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord, DirectionRun, SearchObservation
+from app.models import Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord, Direction, DirectionRun, SearchObservation
 from app.schemas import DirectionCreate, DirectionLocationInput, DirectionQueryInput
 from app.services.direction_collection import execute_direction
 from app.services.directions import create_direction
@@ -49,6 +49,7 @@ def test_direction_limit_is_shared_and_repeat_finds_next(monkeypatch) -> None:
         first = execute_direction(session, direction, settings)
         assert (first.status, first.inserted) == ("completed", 2)
         assert session.query(CompanyDirection).count() == 2
+        assert direction.search_cursor
 
         second = execute_direction(session, direction, settings)
         assert second.status == "completed"
@@ -57,6 +58,73 @@ def test_direction_limit_is_shared_and_repeat_finds_next(monkeypatch) -> None:
         assert session.query(CompanyDirection).count() == 4
         assert session.query(SearchObservation).count() >= 4
         assert session.query(CompanyFieldProvenance).filter_by(field="branches_count").count() >= 1
+
+
+def test_existing_company_in_global_database_is_not_counted_as_new(monkeypatch) -> None:
+    class ExistingAdapter(SourceAdapter):
+        name = "yandex_maps"
+        def collect(self, spec):
+            yield CompanyLead(
+                source=self.name, source_external_id="fresh-source-card", source_url="https://maps.test/existing",
+                company_name="Уже в общей базе", city="Москва", address="Ленина, 1",
+                phone="+7 999 555-44-33",
+            )
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        old_direction = Direction(name="Старое", slug="old", sheet_tab="Старое")
+        existing = Company(
+            source="two_gis", source_external_id="old-card", company_name="Уже в общей базе",
+            city="Москва", address="Ленина, 1", phone="+7 999 555-44-33",
+            normalized_name="уже в общей базе", normalized_phone="79995554433", raw_data={},
+        )
+        session.add_all([old_direction, existing]); session.flush()
+        session.add(CompanyDirection(company_id=existing.id, direction_id=old_direction.id)); session.commit()
+        direction = create_direction(session, DirectionCreate(
+            name="Новое", sheet_tab="Новое", limit_new=1,
+            queries=[DirectionQueryInput(query="компания")],
+            locations=[DirectionLocationInput(city="Москва")], sources=["yandex_maps"],
+        ))
+        monkeypatch.setattr("app.services.direction_collection.build_adapter", lambda *_: ExistingAdapter())
+
+        run = execute_direction(session, direction, Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+        assert run.inserted == 0
+        assert run.duplicates == 1
+        assert session.query(Company).count() == 1
+        assert session.query(CompanyDirection).filter_by(direction_id=direction.id).count() == 0
+        assert session.scalar(select(SearchObservation).where(SearchObservation.direction_id == direction.id)).is_new is False
+
+
+def test_daily_cursor_continues_deeper_in_same_result_list(monkeypatch) -> None:
+    class LongAdapter(SourceAdapter):
+        name = "two_gis"
+        def collect(self, spec):
+            for number in range(1, 7):
+                yield CompanyLead(
+                    source=self.name, source_external_id=f"card-{number}",
+                    source_url=f"https://2gis.test/{number}", company_name=f"Компания {number}",
+                    phone=f"+7 999 700-00-{number:02d}",
+                )
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction = create_direction(session, DirectionCreate(
+            name="Кейтеринг", sheet_tab="Кейтеринг", limit_new=2,
+            queries=[DirectionQueryInput(query="кейтеринг")],
+            locations=[DirectionLocationInput(city="Москва")], sources=["two_gis"],
+        ))
+        monkeypatch.setattr("app.services.direction_collection.build_adapter", lambda *_: LongAdapter())
+        settings = Settings(database_url="sqlite+pysqlite:///:memory:", source_max_scan=20)
+
+        first = execute_direction(session, direction, settings)
+        second = execute_direction(session, direction, settings)
+
+        assert first.inserted == second.inserted == 2
+        assert session.query(Company).count() == 4
+        assert next(iter(direction.search_cursor.values()))["offset"] == 4
 
 
 def test_cross_source_company_is_canonical_and_provenance_retained(monkeypatch) -> None:

@@ -76,7 +76,8 @@ class Direction(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     limit_new: Mapped[int] = mapped_column(Integer, default=50)
-    schedule: Mapped[str | None] = mapped_column(String(100))
+    schedule: Mapped[str | None] = mapped_column(String(100), default="0 5 * * *")
+    search_cursor: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     email_enrichment_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     ai_enrichment_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     automatic_template_id: Mapped[str | None] = mapped_column(

@@ -45,3 +45,31 @@ def test_direction_crud_and_normalized_children() -> None:
 
         archive_direction(session, direction)
         assert direction.active is False and direction.archived_at is not None
+
+
+def test_new_direction_defaults_to_fifty_companies_daily() -> None:
+    data = DirectionCreate(
+        name="Отели", sheet_tab="Отели",
+        queries=[DirectionQueryInput(query="отель")],
+        locations=[DirectionLocationInput(city="Москва")],
+        sources=["yandex_maps"],
+    )
+    assert data.limit_new == 50
+    assert data.schedule == "0 5 * * *"
+
+
+def test_active_direction_cannot_accidentally_lose_daily_schedule() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        data = DirectionCreate(
+            name="Школы", sheet_tab="Школы", active=True, schedule=None,
+            queries=[DirectionQueryInput(query="школа")],
+            locations=[DirectionLocationInput(city="Москва")], sources=["two_gis"],
+        )
+        direction = create_direction(session, data)
+        assert direction.schedule == "0 5 * * *"
+        direction.schedule = None
+        session.commit()
+        update_direction(session, direction, DirectionUpdate(active=True))
+        assert direction.schedule == "0 5 * * *"
