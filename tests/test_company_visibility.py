@@ -2,7 +2,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.main import companies
+from app.main import companies, directions
 from app.models import Company, CompanyDirection, Direction
 
 
@@ -28,3 +28,19 @@ def test_admin_companies_only_include_active_directions() -> None:
         )
 
         assert [row.id for row in rows] == [visible.id]
+
+
+def test_admin_directions_only_include_active_by_default() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        active = Direction(name="Активное", slug="active", sheet_tab="Активное", active=True)
+        paused = Direction(name="Приостановленное", slug="paused", sheet_tab="Приостановленное", active=False)
+        session.add_all([active, paused])
+        session.commit()
+
+        visible = directions(include_archived=False, include_inactive=False, session=session)
+        all_unarchived = directions(include_archived=False, include_inactive=True, session=session)
+
+        assert [row.id for row in visible] == [active.id]
+        assert {row.id for row in all_unarchived} == {active.id, paused.id}

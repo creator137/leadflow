@@ -245,10 +245,16 @@ def update_company(company_id: str, payload: CompanyUpdate, session: Session = D
 
 
 @app.get("/api/directions", response_model=list[DirectionRead])
-def directions(include_archived: bool = False, session: Session = Depends(get_db)) -> list[DirectionRead]:
+def directions(
+    include_archived: bool = False,
+    include_inactive: bool = False,
+    session: Session = Depends(get_db),
+) -> list[DirectionRead]:
     query = select(Direction).order_by(Direction.created_at.desc())
     if not include_archived:
         query = query.where(Direction.archived_at.is_(None))
+    if not include_inactive:
+        query = query.where(Direction.active.is_(True))
     return [serialize_direction(session, item) for item in session.scalars(query)]
 
 
