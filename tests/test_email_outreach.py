@@ -234,9 +234,13 @@ def test_poll_reads_inbox_and_junk_with_separate_checkpoints(db: Session, monkey
     delivery = build_delivery(db, company, account, template, Settings()); delivery.status, delivery.message_id = "sent", "<original@example.test>"; db.commit()
     def reply(message_id, body):
         row = EmailMessage(); row["From"] = delivery.recipient_email; row["Message-ID"] = message_id; row["In-Reply-To"] = delivery.message_id; row.set_content(body); return row.as_bytes()
-    client = FakeIMAP({"INBOX": {1: reply("<inbox@example.test>", "Ответ из входящих")}, "Spam": {1: reply("<spam@example.test>", "Ответ из спама")}})
+    client = FakeIMAP({"INBOX": {1: reply("<inbox@example.test>", "Ответ из входящих")}, "Spam": {}})
     monkeypatch.setattr("app.services.imap_monitor.imap_connection", lambda _: client)
-    assert poll_mailbox(db, account) == 2
+    # The first junk poll establishes a checkpoint, so old Spam mail is never
+    # replayed or forwarded when the feature is enabled on an existing mailbox.
+    assert poll_mailbox(db, account) == 1
+    client.messages["Spam"][2] = reply("<spam@example.test>", "Ответ из спама")
+    assert poll_mailbox(db, account) == 1
     assert {row.imap_folder for row in db.scalars(select(InboundReply))} == {"INBOX", "Spam"}
     assert poll_mailbox(db, account) == 0
 

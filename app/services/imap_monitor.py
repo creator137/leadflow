@@ -162,16 +162,17 @@ def _junk_folders(client) -> list[str]:
     return list(dict.fromkeys(folders))
 
 
-def _folder_checkpoint(session: Session, account: MailAccount, folder: str, uidvalidity: int) -> ImapFolderCheckpoint:
+def _folder_checkpoint(session: Session, account: MailAccount, folder: str, uidvalidity: int) -> tuple[ImapFolderCheckpoint, bool]:
     checkpoint = session.scalar(select(ImapFolderCheckpoint).where(
         ImapFolderCheckpoint.mailbox_id == account.id, ImapFolderCheckpoint.folder == folder,
     ))
     if checkpoint is None:
         checkpoint = ImapFolderCheckpoint(mailbox_id=account.id, folder=folder, uidvalidity=uidvalidity, last_uid=0)
         session.add(checkpoint); session.flush()
+        return checkpoint, True
     elif checkpoint.uidvalidity != uidvalidity:
         checkpoint.uidvalidity, checkpoint.last_uid = uidvalidity, 0
-    return checkpoint
+    return checkpoint, False
 
 
 def _poll_folder(session: Session, client, account: MailAccount, folder: str, manager_email: str | None) -> int:
@@ -184,7 +185,16 @@ def _poll_folder(session: Session, client, account: MailAccount, folder: str, ma
             account.imap_uidvalidity, account.imap_last_uid = uidvalidity, 0
         last_uid = account.imap_last_uid
     else:
-        checkpoint = _folder_checkpoint(session, account, folder, uidvalidity)
+        checkpoint, is_new_folder = _folder_checkpoint(session, account, folder, uidvalidity)
+        # Do not replay an entire historic Spam/Junk folder when support for it
+        # is enabled for an existing mailbox. New replies arriving afterwards
+        # are processed normally and have their own durable checkpoint.
+        if is_new_folder:
+            status, data = client.uid("search", None, "ALL")
+            if status == "OK" and data and data[0]:
+                checkpoint.last_uid = max(int(value) for value in data[0].split())
+            session.commit()
+            return 0
         last_uid = checkpoint.last_uid
     session.commit()
     status, data = client.uid("search", None, f"UID {last_uid + 1}:*")
