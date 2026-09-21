@@ -345,6 +345,7 @@ def render_proposal(draft: SheetPersonalizationDraft, company: Company, settings
 def prepare_proposal_draft(
     session: Session, company: Company, settings: Settings, *, mailbox: MailAccount | None = None,
     config: GoogleSheetsConfig | None = None, command_key: str | None = None, regenerate: bool = False,
+    recipient_sheet_fields: dict[str, str | None] | None = None,
 ) -> SheetPersonalizationDraft:
     direction = direction_for_company(session, company.id)
     if not direction:
@@ -354,11 +355,19 @@ def prepare_proposal_draft(
     legacy_template = delivery_template_for_direction(session, direction)
     command_key = command_key or hashlib.sha256(f"proposal-draft-v1:{company.id}:{business_template.version}".encode()).hexdigest()
     draft = session.scalar(select(SheetPersonalizationDraft).where(SheetPersonalizationDraft.command_key == command_key))
-    if draft and draft.status in {"ready", "sent"} and not regenerate:
-        return draft
-    resolved_recipient = (valid_email(draft.recipient_email) if draft else None) or resolve_recipient_email(company)
+    manually_overridden = bool(draft and draft.recipient_manually_overridden)
+    resolved_recipient = (
+        valid_email(draft.recipient_email) if manually_overridden else
+        resolve_recipient_email(company, sheet_fields=recipient_sheet_fields)
+    )
     if not resolved_recipient:
         raise ValueError("У компании не указан email для отправки")
+    if draft and draft.status in {"ready", "sent"} and not regenerate:
+        if draft.status != "sent" and not manually_overridden and draft.recipient_email != resolved_recipient:
+            draft.recipient_email = resolved_recipient
+            session.commit()
+            session.refresh(draft)
+        return draft
     created = draft is None
     if not draft:
         draft = SheetPersonalizationDraft(
@@ -401,7 +410,7 @@ def prepare_proposal_draft(
     draft.template_id = legacy_template.id
     draft.template_version = draft.template_version or business_template.version
     draft.request_key = request_key
-    if not draft.recipient_email:
+    if not draft.recipient_manually_overridden:
         draft.recipient_email = resolved_recipient
     if not draft.attachments_snapshot:
         draft.attachments_snapshot = active_attachments(session, direction.id)
@@ -429,12 +438,31 @@ def prepare_proposal_draft(
     return draft
 
 
+def refresh_draft_recipient_from_sheet(
+    session: Session, draft: SheetPersonalizationDraft, company: Company,
+    recipient_sheet_fields: dict[str, str | None],
+) -> SheetPersonalizationDraft:
+    """Refresh an unsent automatic recipient without touching a manual override."""
+    if draft.status == "sent" or draft.recipient_manually_overridden:
+        return draft
+    recipient = resolve_recipient_email(company, sheet_fields=recipient_sheet_fields)
+    if not recipient:
+        raise ValueError("У компании не указан email для отправки")
+    if draft.recipient_email != recipient:
+        draft.recipient_email = recipient
+        session.commit()
+        session.refresh(draft)
+    return draft
+
+
 def update_proposal_draft(session: Session, draft: SheetPersonalizationDraft, values: dict[str, Any], settings: Settings) -> SheetPersonalizationDraft:
     if draft.status == "sent":
         raise ValueError("Отправленное письмо нельзя изменить.")
     editable = {"subject", "greeting", "main_body", "ai_personalization", "extra_block", "cta", "signature", "mailbox_id", "recipient_email"}
     for key, value in values.items():
         if key in editable:
+            if key == "recipient_email" and value != draft.recipient_email:
+                draft.recipient_manually_overridden = True
             setattr(draft, key, value)
     company = session.get(Company, draft.company_id)
     if not company:

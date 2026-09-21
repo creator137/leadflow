@@ -343,6 +343,31 @@ def _parse_manual(field_name: str, value: str) -> Any:
     return value
 
 
+def sheet_recipient_fields(schema: SheetSchema, row: list[str]) -> dict[str, str]:
+    """Read the two semantic recipient fields from one Sheet row."""
+    return {
+        field_name: row[column - 1].strip() if len(row) >= column else ""
+        for field_name in ("company_email", "decision_maker_email")
+        if (column := schema.fields.get(field_name)) is not None
+    }
+
+
+def import_sheet_recipient_fields(
+    session: Session, config: GoogleSheetsConfig, direction: Direction, company: Company,
+    row_number: int, schema: SheetSchema, row: list[str],
+) -> dict[str, str]:
+    """Import non-empty Sheet addresses and return exact row values for resolution."""
+    values = sheet_recipient_fields(schema, row)
+    source_url = f"google-sheets://{config.spreadsheet_id}/{direction.sheet_tab}/{row_number}"
+    for field_name, value in values.items():
+        if value:
+            apply_field(
+                session, company, field_name, value, discovery_method="manual",
+                source_url=source_url, confidence=1.0,
+            )
+    return values
+
+
 def worksheet_from_config(config: GoogleSheetsConfig, sheet_tab: str, *, create_if_missing: bool = False):
     info = json.loads(decrypt_secret(config.credentials_encrypted))
     credentials = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/spreadsheets"])

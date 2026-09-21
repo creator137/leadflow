@@ -582,6 +582,7 @@ class SheetPersonalizationDraft(Base):
     template_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     mailbox_id: Mapped[str | None] = mapped_column(ForeignKey("mail_accounts.id"))
     recipient_email: Mapped[str | None] = mapped_column(String(320))
+    recipient_manually_overridden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     command_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     request_key: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="preparing", index=True)

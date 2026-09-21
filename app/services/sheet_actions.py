@@ -9,9 +9,15 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import Company, CompanyDirection, Direction, EmailDelivery, SheetPersonalizationDraft
-from app.services.google_sheets import _column_letter, _retry, active_sheets_config, discover_schema, worksheet_from_config
+from app.services.google_sheets import (
+    _column_letter, _retry, active_sheets_config, discover_schema,
+    import_sheet_recipient_fields, worksheet_from_config,
+)
 from app.services.mailing import send_delivery
-from app.services.proposals import delivery_template_for_direction, ensure_proposal_template, finalize_proposal_delivery, prepare_proposal_draft
+from app.services.proposals import (
+    delivery_template_for_direction, ensure_proposal_template, finalize_proposal_delivery,
+    prepare_proposal_draft, refresh_draft_recipient_from_sheet,
+)
 from app.services.sheet_personalization import PREVIEW_HEADER, STATUS_HEADER, _default_mailbox, _ensure_column, send_sheet_draft
 
 
@@ -20,7 +26,7 @@ def _direction(session: Session, company_id: str) -> Direction | None:
                           .where(CompanyDirection.company_id == company_id, Direction.archived_at.is_(None)).limit(1))
 
 
-def _sheet_row(session: Session, company_id: str, direction: Direction, settings: Settings) -> tuple[Any, int, int, int]:
+def _sheet_row(session: Session, company_id: str, direction: Direction, settings: Settings) -> tuple[Any, list[str], Any, int, int, int]:
     config = active_sheets_config(session, settings)
     if not config:
         raise ValueError("Google Таблица не подключена")
@@ -32,7 +38,7 @@ def _sheet_row(session: Session, company_id: str, direction: Direction, settings
             header = rows[schema.header_row - 1]
             status = _ensure_column(worksheet, header, schema.header_row, STATUS_HEADER)
             preview = _ensure_column(worksheet, header, schema.header_row, PREVIEW_HEADER)
-            return worksheet, row_number, status, preview
+            return worksheet, row, schema, row_number, status, preview
     raise ValueError("Компания не найдена в Google Таблице")
 
 
@@ -60,8 +66,11 @@ def execute_sheet_action(session: Session, company_id: str, action: str, setting
     direction = _direction(session, company_id)
     if not direction:
         raise ValueError("Направление компании не найдено")
-    worksheet, row, status_column, preview_column = _sheet_row(session, company_id, direction, settings)
+    worksheet, sheet_row, schema, row, status_column, preview_column = _sheet_row(session, company_id, direction, settings)
     config = active_sheets_config(session, settings)
+    recipient_fields = import_sheet_recipient_fields(
+        session, config, direction, company, row, schema, sheet_row,
+    )
     template, mailbox = delivery_template_for_direction(session, direction), _default_mailbox(session)
     if not mailbox: raise ValueError("Почтовый ящик недоступен")
     proposal_template = ensure_proposal_template(session, direction)
@@ -73,6 +82,7 @@ def execute_sheet_action(session: Session, company_id: str, action: str, setting
         if action == "prepare":
             if not company.website: raise ValueError("Не указан сайт")
             if draft and draft.status == "ready":
+                draft = refresh_draft_recipient_from_sheet(session, draft, company, recipient_fields)
                 preview_url = f"{settings.public_base_url.rstrip('/')}/?company={company.id}&draft={draft.id}#companies"
                 _write(worksheet, row, status_column, preview_column, "КП подготовлено", preview_url)
                 return {"status": "КП подготовлено", "preview_url": preview_url, "duplicate": True}
@@ -87,6 +97,7 @@ def execute_sheet_action(session: Session, company_id: str, action: str, setting
             _write(worksheet, row, status_column, preview_column, "Подготовка...")
             draft = prepare_proposal_draft(
                 session, company, settings, mailbox=mailbox, config=config, command_key=command_key,
+                recipient_sheet_fields=recipient_fields,
             )
             preview_url = f"{settings.public_base_url.rstrip('/')}/?company={company.id}&draft={draft.id}#companies"
             _write(worksheet, row, status_column, preview_column, "КП подготовлено", preview_url)

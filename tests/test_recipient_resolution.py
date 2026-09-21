@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -88,6 +89,7 @@ def test_proposal_uses_lpr_and_preserves_manual_override() -> None:
         draft = prepare_proposal_draft(session, company, settings, mailbox=mailbox)
         assert draft.recipient_email == "lpr@example.test"
         update_proposal_draft(session, draft, {"recipient_email": "manual@example.test"}, settings)
+        assert draft.recipient_manually_overridden is True
         company.decision_maker_email = company.company_email = company.email = None; session.commit()
         same = prepare_proposal_draft(session, company, settings, mailbox=mailbox, regenerate=True)
         assert same.id == draft.id and same.recipient_email == "manual@example.test"
@@ -129,13 +131,24 @@ def test_google_sheet_column_k_maps_to_lpr_without_mixing_addresses() -> None:
         assert company.decision_maker_email == "person-new@example.test"
 
 
-def test_google_sheet_prepare_uses_lpr_priority() -> None:
+@pytest.mark.parametrize(("sheet_company", "sheet_lpr", "expected"), [
+    ("general-a@example.test", "person-a@example.test", "person-a@example.test"),
+    ("", "person-b@example.test", "person-b@example.test"),
+    ("general-c@example.test", "", "general-c@example.test"),
+])
+def test_google_sheet_prepare_uses_current_semantic_email_columns(
+    sheet_company: str, sheet_lpr: str, expected: str,
+) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:"); Base.metadata.create_all(engine)
     with Session(engine) as session:
         direction, company, _, _ = setup(session)
         config = GoogleSheetsConfig(spreadsheet_id="sheet-trigger", worksheet_name="unused", credentials_encrypted="unused")
         session.add(config); session.commit()
         worksheet = FakeWorksheet(); GoogleSheetsSyncService(session, config).sync_direction(direction, worksheet=worksheet)
+        company_column = worksheet.rows[0].index("Почта")
+        lpr_column = worksheet.rows[0].index("Почта", company_column + 1)
+        worksheet.rows[1][company_column] = sheet_company
+        worksheet.rows[1][lpr_column] = sheet_lpr
         action_column = worksheet.rows[0].index("Действие")
         worksheet.rows[1][action_column] = "Подготовить персональное КП"
         result = process_sheet_personalization_triggers(
@@ -143,4 +156,22 @@ def test_google_sheet_prepare_uses_lpr_priority() -> None:
         )
         assert result["prepared"] == 1
         draft = session.scalar(select(SheetPersonalizationDraft))
-        assert draft and draft.company_id == company.id and draft.recipient_email == "lpr@example.test"
+        assert draft and draft.company_id == company.id and draft.recipient_email == expected
+
+
+def test_google_sheet_prepare_blocks_when_both_semantic_addresses_are_empty() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:"); Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction, _, _, _ = setup(session)
+        config = GoogleSheetsConfig(spreadsheet_id="sheet-empty", worksheet_name="unused", credentials_encrypted="unused")
+        session.add(config); session.commit()
+        worksheet = FakeWorksheet(); GoogleSheetsSyncService(session, config).sync_direction(direction, worksheet=worksheet)
+        company_column = worksheet.rows[0].index("Почта")
+        lpr_column = worksheet.rows[0].index("Почта", company_column + 1)
+        worksheet.rows[1][company_column] = worksheet.rows[1][lpr_column] = ""
+        worksheet.rows[1][worksheet.rows[0].index("Действие")] = "Подготовить персональное КП"
+        result = process_sheet_personalization_triggers(
+            session, config, direction, Settings(public_base_url="https://leadflow.example"), worksheet=worksheet,
+        )
+        assert result["errors"] == 1
+        assert session.scalar(select(SheetPersonalizationDraft)).status == "error"

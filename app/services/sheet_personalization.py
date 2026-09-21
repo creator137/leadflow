@@ -12,8 +12,14 @@ from app.models import (
     Company, CompanyDirection, Direction, EmailDelivery, EmailTemplate, GoogleSheetsConfig,
     MailAccount, SheetPersonalizationDraft,
 )
-from app.services.google_sheets import _column_letter, _normalized, _retry, discover_schema, worksheet_from_config
-from app.services.proposals import delivery_template_for_direction, ensure_proposal_template, prepare_proposal_draft, send_proposal_draft
+from app.services.google_sheets import (
+    _column_letter, _normalized, _retry, discover_schema, import_sheet_recipient_fields,
+    worksheet_from_config,
+)
+from app.services.proposals import (
+    delivery_template_for_direction, ensure_proposal_template, prepare_proposal_draft,
+    refresh_draft_recipient_from_sheet, send_proposal_draft,
+)
 from app.services.user_errors import human_error
 
 
@@ -100,6 +106,9 @@ def process_sheet_personalization_triggers(
             updates.append({"range": f"{_column_letter(preview_column)}{row_number}", "values": [[message]]})
             counters["errors"] += 1
             continue
+        recipient_fields = import_sheet_recipient_fields(
+            session, config, direction, company, row_number, schema, row,
+        )
         if draft is None:
             draft = SheetPersonalizationDraft(
                 company_id=company.id, direction_id=direction.id, config_id=config.id,
@@ -112,12 +121,13 @@ def process_sheet_personalization_triggers(
             except IntegrityError:
                 session.rollback()
                 draft = session.scalar(select(SheetPersonalizationDraft).where(SheetPersonalizationDraft.command_key == command_key))
-        if draft.status == "preparing" and not draft.request_key:
+        if draft.status in {"preparing", "error"} and not draft.request_key:
             preparing_cell = f"{_column_letter(status_column)}{row_number}"
             _retry(lambda: worksheet.update(range_name=preparing_cell, values=[["Подготовка..."]]))
             try:
                 draft = prepare_proposal_draft(
                     session, company, settings, mailbox=mailbox, config=config, command_key=command_key,
+                    recipient_sheet_fields=recipient_fields,
                 )
                 counters["prepared"] += 1
             except Exception as exc:
@@ -128,6 +138,8 @@ def process_sheet_personalization_triggers(
                     session.commit()
                 counters["errors"] += 1
         else:
+            if draft and draft.status == "ready":
+                draft = refresh_draft_recipient_from_sheet(session, draft, company, recipient_fields)
             counters["reused"] += 1
         delivery = session.get(EmailDelivery, draft.delivery_id) if draft and draft.delivery_id else None
         status = _sheet_status(draft, delivery) if draft else "Ошибка"
