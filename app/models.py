@@ -465,6 +465,7 @@ class InboundReply(Base):
     message_id: Mapped[str | None] = mapped_column(String(998), unique=True)
     imap_uid: Mapped[int | None] = mapped_column(Integer)
     imap_uidvalidity: Mapped[int | None] = mapped_column(Integer)
+    imap_folder: Mapped[str] = mapped_column(String(255), nullable=False, default="INBOX")
     in_reply_to: Mapped[str | None] = mapped_column(String(998))
     references: Mapped[str | None] = mapped_column(Text)
     sender: Mapped[str] = mapped_column(String(320), nullable=False)
@@ -475,8 +476,21 @@ class InboundReply(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (
-        UniqueConstraint("mailbox_id", "imap_uidvalidity", "imap_uid", name="uq_inbound_mailbox_uid"),
+        UniqueConstraint("mailbox_id", "imap_folder", "imap_uidvalidity", "imap_uid", name="uq_inbound_mailbox_uid"),
     )
+
+
+class ImapFolderCheckpoint(Base):
+    __tablename__ = "imap_folder_checkpoints"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    mailbox_id: Mapped[str] = mapped_column(ForeignKey("mail_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    folder: Mapped[str] = mapped_column(String(255), nullable=False)
+    uidvalidity: Mapped[int | None] = mapped_column(Integer)
+    last_uid: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (UniqueConstraint("mailbox_id", "folder", name="uq_imap_checkpoint_folder"),)
 
 
 class GoogleSheetsConfig(Base):

@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, validate_production_secrets
 from app.db import Base
-from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailEvent, EmailTemplate, InboundReply, MailAccount, Suppression, TrackedLink
+from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailEvent, EmailTemplate, GoogleSheetsConfig, InboundReply, MailAccount, SheetRowMapping, Suppression, TrackedLink
 from app.schemas import MailAccountRead
-from app.services.imap_monitor import classify_bounce, process_inbound
+from app.services.imap_monitor import classify_bounce, poll_mailbox, process_inbound
 from app.services.mailing import build_delivery, build_email_message, claim_delivery, diagnose_smtp, queue_campaign, send_claimed_delivery, send_delivery
 from app.services.secrets import encrypt_secret
 
@@ -19,6 +19,19 @@ class FakeSMTP:
     def __exit__(self, *_): return None
     def login(self, *_): return (235, b"ok")
     def send_message(self, message): self.message = message; return {}
+
+
+class FakeIMAP:
+    def __init__(self, messages): self.messages, self.selected = messages, ""
+    def __enter__(self): return self
+    def __exit__(self, *_): return None
+    def login(self, *_): return "OK", []
+    def list(self): return "OK", [b'(\\HasNoChildren \\Marked \\NoInferiors) "|" INBOX', b'(\\HasNoChildren \\Unmarked \\Junk) "|" Spam']
+    def select(self, folder): self.selected = folder; return "OK", [b"1"]
+    def response(self, _): return "UIDVALIDITY", [b"9"]
+    def uid(self, command, value, *_):
+        if command == "search": return "OK", [b" ".join(str(uid).encode() for uid in self.messages.get(self.selected, {}))]
+        return "OK", [(b"RFC822", self.messages[self.selected][int(value)])]
 
 
 def setup(session: Session):
@@ -207,6 +220,41 @@ def test_reply_matching_and_uid_idempotency(db: Session) -> None:
     assert delivery.status == "replied" and db.query(InboundReply).count() == 1
     assert db.scalar(select(EmailEvent.event_type).where(EmailEvent.delivery_id == delivery.id, EmailEvent.event_type == "replied")) == "replied"
     assert company.action == "Получен ответ"
+
+
+def test_unmatched_incoming_is_not_recorded_as_a_reply(db: Session) -> None:
+    _, _, account, _ = setup(db)
+    incoming = EmailMessage(); incoming["From"] = "notice@example.test"; incoming["Message-ID"] = "<unmatched@example.test>"; incoming.set_content("Новости")
+    assert process_inbound(db, account, incoming.as_bytes(), 51, 7) is False
+    assert db.query(InboundReply).count() == 0
+
+
+def test_poll_reads_inbox_and_junk_with_separate_checkpoints(db: Session, monkeypatch) -> None:
+    _, company, account, template = setup(db)
+    delivery = build_delivery(db, company, account, template, Settings()); delivery.status, delivery.message_id = "sent", "<original@example.test>"; db.commit()
+    def reply(message_id, body):
+        row = EmailMessage(); row["From"] = delivery.recipient_email; row["Message-ID"] = message_id; row["In-Reply-To"] = delivery.message_id; row.set_content(body); return row.as_bytes()
+    client = FakeIMAP({"INBOX": {1: reply("<inbox@example.test>", "Ответ из входящих")}, "Spam": {1: reply("<spam@example.test>", "Ответ из спама")}})
+    monkeypatch.setattr("app.services.imap_monitor.imap_connection", lambda _: client)
+    assert poll_mailbox(db, account) == 2
+    assert {row.imap_folder for row in db.scalars(select(InboundReply))} == {"INBOX", "Spam"}
+    assert poll_mailbox(db, account) == 0
+
+
+def test_manager_forward_contains_sheet_and_company_identification(db: Session, monkeypatch) -> None:
+    direction, company, account, template = setup(db)
+    account.forward_replies_to = "manager@example.test"
+    config = GoogleSheetsConfig(spreadsheet_id="sheet", worksheet_name="test", credentials_encrypted="unused")
+    db.add(config); db.flush()
+    db.add(SheetRowMapping(company_id=company.id, direction_id=direction.id, spreadsheet_id="sheet", sheet_tab="Кафе", sheet_row=17))
+    delivery = build_delivery(db, company, account, template, Settings()); delivery.status, delivery.message_id = "sent", "<original@example.test>"; db.commit()
+    smtp = FakeSMTP(); monkeypatch.setattr("app.services.imap_monitor.smtp_connection", lambda _: smtp)
+    reply = EmailMessage(); reply["From"] = delivery.recipient_email; reply["Message-ID"] = "<manager-reply@example.test>"; reply["In-Reply-To"] = delivery.message_id; reply.set_content("Интересно, пришлите каталог")
+    assert process_inbound(db, account, reply.as_bytes(), 52, 7) is True
+    content = smtp.message.get_body(("plain",)).get_content()
+    for value in (direction.name, "Кафе", company.company_name, str(17), company.id, delivery.recipient_email, delivery.subject, "Интересно, пришлите каталог"):
+        assert value in content
+    assert db.scalar(select(InboundReply)).forwarded_at is not None
 
 
 def test_hard_bounce_classification_and_suppression(db: Session) -> None:
