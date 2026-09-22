@@ -93,7 +93,7 @@ def test_duplicate_headers_are_mapped_by_position() -> None:
     assert SHARED_SHEET_HEADERS[8] == "Сайт"
     assert SHARED_SHEET_HEADERS[12:] == (
         "Статус почтовых отправлений",
-        "Дата отправки", "Шаблон письма", "Отправитель", "Состояние взаимодействия",
+        "Дата отправки", "Шаблон письма", "Отправитель",
         "Действие", "Результат", "Задача",
         "Действие", "Результат", "Задача",
         "Действие", "Результат", "Задача",
@@ -240,19 +240,13 @@ def test_all_email_tracking_states_and_metadata_update_same_row() -> None:
             "opened": "Открыто", "clicked": "Перешли по ссылке", "replied": "Получен ответ",
             "unsubscribed": "Отписались",
         }
-        interaction = {
-            "sent": "Ожидаем ответ", "send_error": "Требуется проверка",
-            "bounced": "Требуется проверка", "opened": "Ожидаем ответ",
-            "clicked": "Ожидаем ответ", "replied": "Получен ответ",
-            "unsubscribed": "Отписались",
-        }
         for status, russian in expected.items():
             delivery.status = status; session.commit()
             assert sync_delivery_tracking_to_sheet(session, delivery, worksheet=worksheet)
             header, row = worksheet.rows[0], worksheet.rows[1]
             assert row[header.index("Статус почтовых отправлений")] == russian
-            assert row[header.index("Состояние взаимодействия")] == interaction[status]
-            assert row[header.index("Дата отправки")].startswith("2026-09-15T08:30")
+            assert "Состояние взаимодействия" not in header
+            assert row[header.index("Дата отправки")] == "15.09.2026 13:30"
             assert row[header.index("Шаблон письма")] == "КП — рестораны"
             assert row[header.index("Отправитель")] == "Основная почта"
             assert row[9] == "Ручной ЛПР"

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TypeVar
+from zoneinfo import ZoneInfo
 
 import gspread
 import requests
@@ -50,7 +51,7 @@ HEADERS = [header for header, _ in COLUMNS]
 SHARED_SHEET_HEADERS: tuple[str, ...] = (
     *(header for header, _ in BUSINESS_COLUMNS),
     "Статус почтовых отправлений",
-    "Дата отправки", "Шаблон письма", "Отправитель", "Состояние взаимодействия",
+    "Дата отправки", "Шаблон письма", "Отправитель",
     "Действие", "Результат", "Задача",
     "Действие", "Результат", "Задача",
     "Действие", "Результат", "Задача",
@@ -166,27 +167,37 @@ def discover_schema(rows: list[list[str]]) -> SheetSchema:
 
 def _delivery_sheet_values(delivery: EmailDelivery | None, template: EmailTemplate | None, mailbox: MailAccount | None) -> dict[str, str]:
     if not delivery:
-        return {"status": "", "sent_at": "", "template": "", "mailbox": "", "interaction": ""}
+        return {"status": "", "sent_at": "", "template": "", "mailbox": ""}
     status = STATUS_RU.get(delivery.status, delivery.status)
-    interaction = {
-        "queued": "Подготовка к отправке",
-        "sending": "Подготовка к отправке",
-        "sent": "Ожидаем ответ",
-        "opened": "Ожидаем ответ",
-        "clicked": "Ожидаем ответ",
-        "replied": "Получен ответ",
-        "bounced": "Требуется проверка",
-        "failed": "Требуется проверка",
-        "send_error": "Требуется проверка",
-        "unsubscribed": "Отписались",
-    }.get(delivery.status, "Требуется проверка")
     return {
         "status": status,
-        "sent_at": delivery.sent_at.isoformat() if delivery.sent_at else "",
+        "sent_at": _human_datetime(delivery.sent_at),
         "template": template.name if template else "",
         "mailbox": mailbox.name if mailbox else "",
-        "interaction": interaction,
     }
+
+
+def _human_datetime(value: datetime | None) -> str:
+    if not value:
+        return ""
+    # Legacy/SQLite rows can be naïve, but all LeadFlow timestamps are stored
+    # as UTC; make that explicit before showing the administrator local time.
+    local = value.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Asia/Yekaterinburg")) if value.tzinfo is None else value.astimezone(ZoneInfo("Asia/Yekaterinburg"))
+    return local.strftime("%d.%m.%Y %H:%M")
+
+
+def _style_email_status(worksheet: Any, row_number: int, column: int | None, status: str) -> None:
+    """The mail-status cell is system-owned, so response highlighting is safe."""
+    if not column or not hasattr(worksheet, "format"):
+        return
+    cell = f"{_column_letter(column)}{row_number}"
+    try:
+        _retry(lambda: worksheet.format(cell, {
+            "backgroundColor": {"red": 0.72, "green": 0.9, "blue": 0.72} if status == "Получен ответ" else {"red": 1, "green": 1, "blue": 1},
+            "textFormat": {"bold": status == "Получен ответ"},
+        }))
+    except (gspread.exceptions.APIError, requests.RequestException, TransportError):
+        logger.warning("Could not format email status cell %s", cell)
 
 
 def _text(value: Any) -> str:
@@ -229,6 +240,14 @@ def standardize_business_columns(worksheet: Any, rows: list[list[str]]) -> list[
     """
     schema = discover_schema(rows)
     header = rows[schema.header_row - 1][:]
+    # Keep only one user-facing email state. This system-owned duplicate had
+    # a second wording and made the same event look inconsistent.
+    for column in reversed([i for i, value in enumerate(header, 1) if _normalized(value) == "состояние взаимодействия"]):
+        _retry(lambda column=column: worksheet.delete_columns(column))
+        for row in rows:
+            if len(row) >= column:
+                row.pop(column - 1)
+        header = rows[schema.header_row - 1][:]
     website_columns = _website_columns(header)
     if len(website_columns) > 1:
         primary = website_columns[0]
@@ -538,13 +557,13 @@ class GoogleSheetsSyncService:
                 (schema.sent_at_column, "sent_at"),
                 (schema.email_template_column, "template"),
                 (schema.mailbox_column, "mailbox"),
-                (schema.interaction_column, "interaction"),
             ):
                 if not column:
                     continue
                 current = existing[column - 1].strip() if len(existing) >= column else ""
                 if tracking[key] != current:
                     updates.append({"range": f"{_column_letter(column)}{row_number}", "values": [[tracking[key]]]})
+            _style_email_status(worksheet, row_number, schema.email_status_column, tracking["status"])
             if mapping is None:
                 mapping = SheetRowMapping(company_id=company.id, direction_id=direction.id, spreadsheet_id=self.config.spreadsheet_id, sheet_tab=direction.sheet_tab, sheet_row=row_number, last_synced_values=synced_values)
                 self.session.add(mapping)
@@ -601,12 +620,12 @@ def sync_delivery_tracking_to_sheet(
         (schema.sent_at_column, "sent_at"),
         (schema.email_template_column, "template"),
         (schema.mailbox_column, "mailbox"),
-        (schema.interaction_column, "interaction"),
     ):
         if column:
             updates.append({"range": f"{_column_letter(column)}{row_number}", "values": [[values[key]]]})
     if updates:
         _retry(lambda: worksheet.batch_update(updates))
+    _style_email_status(worksheet, row_number, schema.email_status_column, values["status"])
     mapping.sheet_row = row_number
     mapping.last_synced_at = datetime.now(timezone.utc)
     session.commit()
