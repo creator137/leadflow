@@ -190,7 +190,10 @@ def _style_email_status(worksheet: Any, row_number: int, column: int | None, sta
     if not column or not hasattr(worksheet, "format") or not hasattr(worksheet, "spreadsheet"):
         return
     try:
-        _retry(lambda: worksheet.spreadsheet.batch_update({"requests": [{"repeatCell": {
+        # Decorative formatting must never hold up business data sync during a
+        # temporary Google API/DNS failure. The status value has already been
+        # written through the retrying business path above.
+        worksheet.spreadsheet.batch_update({"requests": [{"repeatCell": {
             "range": {"sheetId": worksheet.id, "startRowIndex": row_number - 1, "endRowIndex": row_number,
                       "startColumnIndex": column - 1, "endColumnIndex": column},
             "cell": {"userEnteredFormat": {
@@ -198,7 +201,7 @@ def _style_email_status(worksheet: Any, row_number: int, column: int | None, sta
                 "textFormat": {"bold": status == "Получен ответ"},
             }},
             "fields": "userEnteredFormat(backgroundColor,textFormat.bold)",
-        }}]}))
+        }}]})
     except (gspread.exceptions.APIError, requests.RequestException, TransportError):
         logger.warning("Could not format email status cell %s%s", _column_letter(column), row_number)
 
