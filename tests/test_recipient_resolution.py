@@ -117,7 +117,7 @@ def test_google_sheet_column_k_maps_to_lpr_without_mixing_addresses() -> None:
         service.sync_direction(direction, worksheet=worksheet)
         company_column = worksheet.rows[0].index("Почта")
         lpr_column = worksheet.rows[0].index("Почта", company_column + 1)
-        assert lpr_column == 10  # Google Sheets column K, zero based.
+        assert lpr_column == 9  # The semantic LPR email remains second "Почта" after removing the date column.
         assert worksheet.rows[1][company_column] == "company@example.test"
         assert worksheet.rows[1][lpr_column] == "lpr@example.test"
         worksheet.rows[1][company_column] = "general-new@example.test"

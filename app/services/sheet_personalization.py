@@ -24,7 +24,8 @@ from app.services.user_errors import human_error
 
 
 SHEET_PERSONALIZATION_COMMAND = "подготовить персональное кп"
-STATUS_HEADER = "Статус персонального КП"
+# Proposal preparation shares the single user-facing mail status column.
+STATUS_HEADER = "Статус почтовых отправлений"
 PREVIEW_HEADER = "Предпросмотр КП"
 
 
@@ -78,7 +79,7 @@ def process_sheet_personalization_triggers(
     if not action_column:
         return {"commands": 0, "prepared": 0, "reused": 0, "errors": 0}
     header = rows[schema.header_row - 1]
-    status_column = _ensure_column(worksheet, header, schema.header_row, STATUS_HEADER)
+    status_column = schema.email_status_column or _ensure_column(worksheet, header, schema.header_row, STATUS_HEADER)
     preview_column = _ensure_column(worksheet, header, schema.header_row, PREVIEW_HEADER)
     updates: list[dict[str, Any]] = []
     counters = {"commands": 0, "prepared": 0, "reused": 0, "errors": 0}

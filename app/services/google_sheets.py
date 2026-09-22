@@ -35,32 +35,31 @@ from app.services.provenance import apply_field
 from app.services.secrets import decrypt_secret, encrypt_secret
 from app.services.user_errors import STATUS_RU
 
-# New worksheets place the website immediately after the company phone. The first twelve columns are
+# New worksheets place the website immediately after the company phone. The first eleven columns are
 # the shared business area; manual workflow columns may safely follow it.
 COLUMNS: tuple[tuple[str, str], ...] = (
-    ("Начало общения / Дата", "communication_started_at"), ("Наименование клиента", "company_name"),
-    ("Область", "region"), ("Город", "city"), ("Кол-во филиалов", "branches_count"),
+    ("Наименование клиента", "company_name"), ("Область", "region"), ("Город", "city"),
+    ("Кол-во филиалов", "branches_count"),
     ("Адрес", "address"), ("Почта", "company_email"), ("Телефон", "company_phone"),
     ("Сайт", "website"), ("ЛПР", "decision_maker_name"), ("Почта", "decision_maker_email"),
     ("Телефон", "decision_maker_phone"),
     ("Действие", "action"), ("Результат?", "result"),
     ("LeadFlow ID", "id"),
 )
-BUSINESS_COLUMNS = COLUMNS[:12]
+BUSINESS_COLUMNS = COLUMNS[:11]
 HEADERS = [header for header, _ in COLUMNS]
 SHARED_SHEET_HEADERS: tuple[str, ...] = (
     *(header for header, _ in BUSINESS_COLUMNS),
     "Статус почтовых отправлений",
-    "Дата отправки", "Шаблон письма", "Отправитель",
+    "Дата отправки", "Предпросмотр КП",
     "Действие", "Результат", "Задача",
     "Действие", "Результат", "Задача",
     "Действие", "Результат", "Задача",
-    "ИТОГ", "Комментарии",
-    "LeadFlow ID", "ИНН", "Статус персонального КП", "Предпросмотр КП",
+    "ИТОГ", "Комментарии", "LeadFlow ID",
 )
 MANUAL_FIELDS = {
-    "communication_started_at", "region", "city", "branches_count", "address", "company_email",
-    "company_phone", "decision_maker_name", "decision_maker_email", "decision_maker_phone", "website", "inn", "action", "result",
+    "region", "city", "branches_count", "address", "company_email", "company_phone",
+    "decision_maker_name", "decision_maker_email", "decision_maker_phone", "website", "action", "result",
 }
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -244,13 +243,33 @@ def standardize_business_columns(worksheet: Any, rows: list[list[str]]) -> list[
     """
     schema = discover_schema(rows)
     header = rows[schema.header_row - 1][:]
-    # Keep only one user-facing email state. This system-owned duplicate had
-    # a second wording and made the same event look inconsistent.
-    for column in reversed([i for i, value in enumerate(header, 1) if _normalized(value) == "состояние взаимодействия"]):
+    # Remove retired system columns as complete columns, preserving all other
+    # data, formulas and the stable LeadFlow ID while remaining columns shift.
+    retired = {
+        "начало общения / дата", "начало общения дата", "шаблон письма", "отправитель",
+        "состояние взаимодействия", "инн", "статус персонального кп",
+    }
+    for column in reversed([i for i, value in enumerate(header, 1) if _normalized(value) in retired]):
+        # A sheet may have a title row above its header. Preserve its text when
+        # the retired column is removed (for example, "Кафе" in A1).
+        title_values = [
+            (row_number, row[column - 1])
+            for row_number, row in enumerate(rows[:schema.header_row - 1], start=1)
+            if len(row) >= column and row[column - 1].strip()
+        ]
         _retry(lambda column=column: worksheet.delete_columns(column))
         for row in rows:
             if len(row) >= column:
                 row.pop(column - 1)
+        for row_number, value in title_values:
+            row = rows[row_number - 1]
+            if len(row) < column or not row[column - 1].strip():
+                _retry(lambda row_number=row_number, column=column, value=value: worksheet.update(
+                    range_name=f"{_column_letter(column)}{row_number}", values=[[value]],
+                ))
+                while len(row) < column:
+                    row.append("")
+                row[column - 1] = value
         header = rows[schema.header_row - 1][:]
     website_columns = _website_columns(header)
     if len(website_columns) > 1:
@@ -434,7 +453,7 @@ class GoogleSheetsSyncService:
         rows = standardize_business_columns(worksheet, rows)
         schema = discover_schema(rows)
         header = rows[schema.header_row - 1]
-        for field_name, field_header in (("branches_count", "Кол-во филиалов"), ("website", "Сайт"), ("inn", "ИНН")):
+        for field_name, field_header in (("branches_count", "Кол-во филиалов"), ("website", "Сайт")):
             if field_name in schema.fields:
                 continue
             column = max(len(header), schema.leadflow_id_column) + 1
@@ -559,8 +578,6 @@ class GoogleSheetsSyncService:
             for column, key in (
                 (schema.email_status_column, "status"),
                 (schema.sent_at_column, "sent_at"),
-                (schema.email_template_column, "template"),
-                (schema.mailbox_column, "mailbox"),
             ):
                 if not column:
                     continue
@@ -622,8 +639,6 @@ def sync_delivery_tracking_to_sheet(
     for column, key in (
         (schema.email_status_column, "status"),
         (schema.sent_at_column, "sent_at"),
-        (schema.email_template_column, "template"),
-        (schema.mailbox_column, "mailbox"),
     ):
         if column:
             updates.append({"range": f"{_column_letter(column)}{row_number}", "values": [[values[key]]]})

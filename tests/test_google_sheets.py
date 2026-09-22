@@ -85,20 +85,19 @@ def setup_company(session: Session):
 
 def test_duplicate_headers_are_mapped_by_position() -> None:
     assert HEADERS.count("Почта") == 2 and HEADERS.count("Телефон") == 2
-    assert COLUMNS[8][1] == "website"
-    assert COLUMNS[6][1] == "company_email"
-    assert COLUMNS[10][1] == "decision_maker_email"
-    assert COLUMNS[7][1] == "company_phone"
-    assert COLUMNS[11][1] == "decision_maker_phone"
-    assert SHARED_SHEET_HEADERS[8] == "Сайт"
-    assert SHARED_SHEET_HEADERS[12:] == (
+    assert COLUMNS[7][1] == "website"
+    assert COLUMNS[5][1] == "company_email"
+    assert COLUMNS[9][1] == "decision_maker_email"
+    assert COLUMNS[6][1] == "company_phone"
+    assert COLUMNS[10][1] == "decision_maker_phone"
+    assert SHARED_SHEET_HEADERS[7] == "Сайт"
+    assert SHARED_SHEET_HEADERS[11:] == (
         "Статус почтовых отправлений",
-        "Дата отправки", "Шаблон письма", "Отправитель",
+        "Дата отправки", "Предпросмотр КП",
         "Действие", "Результат", "Задача",
         "Действие", "Результат", "Задача",
         "Действие", "Результат", "Задача",
-        "ИТОГ", "Комментарии", "LeadFlow ID", "ИНН",
-        "Статус персонального КП", "Предпросмотр КП",
+        "ИТОГ", "Комментарии", "LeadFlow ID",
     )
 
 
@@ -124,9 +123,9 @@ def test_sheet_identity_update_and_manual_preservation() -> None:
         assert len(worksheet.rows) == 2
         id_column = worksheet.rows[0].index("LeadFlow ID")
         assert worksheet.rows[1][id_column] == company.id
-        assert worksheet.rows[0][8] == "Сайт"
+        assert worksheet.rows[0][7] == "Сайт"
 
-        worksheet.rows[1][9] = "Тестовый Менеджер"
+        worksheet.rows[1][8] = "Тестовый Менеджер"
         action_column = worksheet.rows[0].index("Действие")
         result_column = worksheet.rows[0].index("Результат")
         worksheet.rows[1][action_column] = "Связаться позже"
@@ -164,7 +163,7 @@ def test_row_movement_is_found_by_leadflow_id() -> None:
         assert result["inserted"] == 0 and result["updated"] == 1
         id_column = worksheet.rows[0].index("LeadFlow ID")
         matches = [row for row in worksheet.rows if len(row) > id_column and row[id_column] == company.id]
-        assert len(matches) == 1 and matches[0][7] == "+7 000 000-00-00"  # unchanged system value updates after row movement
+        assert len(matches) == 1 and matches[0][6] == "+7 000 000-00-00"  # unchanged system value updates after row movement
 
 
 def test_ai_enrichment_updates_same_sheet_row_only_when_empty() -> None:
@@ -175,17 +174,17 @@ def test_ai_enrichment_updates_same_sheet_row_only_when_empty() -> None:
         worksheet = FakeWorksheet()
         service = GoogleSheetsSyncService(session, config)
         service.sync_direction(direction, worksheet=worksheet)
-        assert worksheet.rows[1][4] == ""
+        assert worksheet.rows[1][3] == ""
         assert apply_field(session, company, "branches_count", 4, discovery_method="ai_website_analysis",
                            source_url="https://example.test/offices", confidence=0.8)
         result = service.sync_direction(direction, worksheet=worksheet)
         assert result["inserted"] == 0 and result["updated"] == 1
         id_column = worksheet.rows[0].index("LeadFlow ID")
         assert len([row for row in worksheet.rows if len(row) > id_column and row[id_column] == company.id]) == 1
-        assert worksheet.rows[1][4] == "4"
-        worksheet.rows[1][4] = "7"
+        assert worksheet.rows[1][3] == "4"
+        worksheet.rows[1][3] = "7"
         service.sync_direction(direction, worksheet=worksheet)
-        assert company.branches_count == 7 and worksheet.rows[1][4] == "7"
+        assert company.branches_count == 7 and worksheet.rows[1][3] == "7"
 
 
 def test_email_status_is_written_to_sheet_in_russian() -> None:
@@ -234,7 +233,7 @@ def test_all_email_tracking_states_and_metadata_update_same_row() -> None:
         service.sync_direction(direction, worksheet=worksheet)
         id_column = worksheet.rows[0].index("LeadFlow ID")
         assert len([row for row in worksheet.rows if len(row) > id_column and row[id_column] == company.id]) == 1
-        worksheet.rows[1][9] = "Ручной ЛПР"
+        worksheet.rows[1][8] = "Ручной ЛПР"
         expected = {
             "sent": "Отправлено", "send_error": "Ошибка отправки", "bounced": "Не доставлено",
             "opened": "Открыто", "clicked": "Перешли по ссылке", "replied": "Получен ответ",
@@ -247,9 +246,8 @@ def test_all_email_tracking_states_and_metadata_update_same_row() -> None:
             assert row[header.index("Статус почтовых отправлений")] == russian
             assert "Состояние взаимодействия" not in header
             assert row[header.index("Дата отправки")] == "15.09.2026 13:30"
-            assert row[header.index("Шаблон письма")] == "КП — рестораны"
-            assert row[header.index("Отправитель")] == "Основная почта"
-            assert row[9] == "Ручной ЛПР"
+            assert "Шаблон письма" not in header and "Отправитель" not in header
+            assert row[8] == "Ручной ЛПР"
 
 
 def test_duplicate_leadflow_id_is_rejected() -> None:
@@ -332,13 +330,13 @@ def test_existing_sheet_gets_website_column_and_preserves_manual_value() -> None
         worksheet.rows = [["Наименование клиента", "Город", "Адрес", "LeadFlow ID"]]
         service = GoogleSheetsSyncService(session, config)
         service.sync_direction(direction, worksheet=worksheet)
-        assert worksheet.rows[0][8] == "Сайт"
-        assert worksheet.rows[0][4] == "Кол-во филиалов"
-        assert worksheet.rows[1][8] == "https://parser.example"
-        worksheet.rows[1][8] = "https://www.manual.example/"
+        assert worksheet.rows[0][7] == "Сайт"
+        assert worksheet.rows[0][3] == "Кол-во филиалов"
+        assert worksheet.rows[1][7] == "https://parser.example"
+        worksheet.rows[1][7] = "https://www.manual.example/"
         service.sync_direction(direction, worksheet=worksheet)
         assert company.website == "https://manual.example"
-        assert worksheet.rows[1][8] == "https://www.manual.example/"
+        assert worksheet.rows[1][7] == "https://www.manual.example/"
         provenance_count = session.query(CompanyFieldProvenance).filter_by(
             company_id=company.id, field="website", discovery_method="manual",
         ).count()
@@ -357,10 +355,10 @@ def test_unchanged_system_value_can_be_updated_after_snapshot() -> None:
         worksheet = FakeWorksheet()
         service = GoogleSheetsSyncService(session, config)
         service.sync_direction(direction, worksheet=worksheet)
-        assert worksheet.rows[1][8] == "https://old.example"
+        assert worksheet.rows[1][7] == "https://old.example"
         company.website = "https://new.example"
         service.sync_direction(direction, worksheet=worksheet)
-        assert worksheet.rows[1][8] == "https://new.example"
+        assert worksheet.rows[1][7] == "https://new.example"
 
 
 def test_existing_early_website_column_wins_and_duplicate_is_removed() -> None:
@@ -380,8 +378,8 @@ def test_existing_early_website_column_wins_and_duplicate_is_removed() -> None:
         GoogleSheetsSyncService(session, config).sync_direction(direction, worksheet=worksheet)
 
         assert worksheet.rows[0].count("Сайт") == 1
-        assert worksheet.rows[0][8] == "Сайт"
-        assert worksheet.rows[1][8] == "https://saved.example"
+        assert worksheet.rows[0][7] == "Сайт"
+        assert worksheet.rows[1][7] == "https://saved.example"
         assert company.website == "https://saved.example"
 
 
@@ -395,8 +393,8 @@ def test_legacy_second_row_header_is_aligned_without_touching_title_row() -> Non
 
     rows = standardize_business_columns(worksheet, worksheet.get_all_values())
 
-    assert "Кафе" in rows[0][:12]
-    assert rows[1][:12] == [title for title, _ in BUSINESS_COLUMNS]
+    assert "Кафе" in rows[0]
+    assert rows[1][:11] == [title for title, _ in BUSINESS_COLUMNS]
 
 
 def test_interrupted_alignment_reuses_blank_and_removes_empty_contact_duplicate() -> None:
@@ -411,10 +409,10 @@ def test_interrupted_alignment_reuses_blank_and_removes_empty_contact_duplicate(
 
     rows = standardize_business_columns(worksheet, worksheet.get_all_values())
 
-    assert rows[1][:12] == [title for title, _ in BUSINESS_COLUMNS]
-    assert rows[2][8] == "https://example.test"
-    assert rows[2][6] == "info@example.test"
-    assert rows[2][7] == "+70000000000"
+    assert rows[1][:11] == [title for title, _ in BUSINESS_COLUMNS]
+    assert rows[2][7] == "https://example.test"
+    assert rows[2][5] == "info@example.test"
+    assert rows[2][6] == "+70000000000"
 
 
 def test_manual_value_can_be_changed_again_after_snapshot() -> None:
@@ -426,18 +424,18 @@ def test_manual_value_can_be_changed_again_after_snapshot() -> None:
         service = GoogleSheetsSyncService(session, config)
         service.sync_direction(direction, worksheet=worksheet)
 
-        worksheet.rows[1][9] = "Первый менеджер"
+        worksheet.rows[1][8] = "Первый менеджер"
         service.sync_direction(direction, worksheet=worksheet)
         assert company.decision_maker_name == "Первый менеджер"
 
-        worksheet.rows[1][9] = "Новый менеджер"
+        worksheet.rows[1][8] = "Новый менеджер"
         service.sync_direction(direction, worksheet=worksheet)
         assert company.decision_maker_name == "Новый менеджер"
-        assert worksheet.rows[1][9] == "Новый менеджер"
+        assert worksheet.rows[1][8] == "Новый менеджер"
 
         assert apply_field(
             session, company, "decision_maker_name", "Менеджер из LeadFlow",
             discovery_method="manual", confidence=1.0,
         ) is True
         service.sync_direction(direction, worksheet=worksheet)
-        assert worksheet.rows[1][9] == "Менеджер из LeadFlow"
+        assert worksheet.rows[1][8] == "Менеджер из LeadFlow"

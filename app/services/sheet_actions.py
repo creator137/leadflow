@@ -36,7 +36,9 @@ def _sheet_row(session: Session, company_id: str, direction: Direction, settings
     for row_number, row in enumerate(rows[schema.data_row - 1:], start=schema.data_row):
         if len(row) >= schema.leadflow_id_column and row[schema.leadflow_id_column - 1].strip() == company_id:
             header = rows[schema.header_row - 1]
-            status = _ensure_column(worksheet, header, schema.header_row, STATUS_HEADER)
+            # Sheet has one business status column for both preparation and
+            # delivery. Do not recreate the retired "Статус персонального КП".
+            status = schema.email_status_column or _ensure_column(worksheet, header, schema.header_row, STATUS_HEADER)
             preview = _ensure_column(worksheet, header, schema.header_row, PREVIEW_HEADER)
             return worksheet, row, schema, row_number, status, preview
     raise ValueError("Компания не найдена в Google Таблице")

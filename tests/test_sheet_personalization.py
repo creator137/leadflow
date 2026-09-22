@@ -87,7 +87,7 @@ def test_sheet_command_prepares_once_by_stable_leadflow_id(monkeypatch) -> None:
         assert first["prepared"] == 1 and second["reused"] == 1 and calls == 1
         draft = session.scalar(select(SheetPersonalizationDraft))
         assert draft and draft.company_id == company.id and draft.status == "ready"
-        status_column = worksheet.rows[0].index("Статус персонального КП")
+        status_column = worksheet.rows[0].index("Статус почтовых отправлений")
         preview_column = worksheet.rows[0].index("Предпросмотр КП")
         assert worksheet.rows[1][status_column] == "Готово к отправке"
         assert f"company={company.id}" in worksheet.rows[1][preview_column]
