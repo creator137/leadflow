@@ -8,7 +8,7 @@ from app.db import Base
 from app.models import Company, CompanyDirection, CompanyFieldProvenance, Direction, EmailDelivery, EmailTemplate, GoogleSheetsConfig, MailAccount, SheetRowMapping
 from app.services.google_sheets import (
     BUSINESS_COLUMNS, COLUMNS, HEADERS, SHARED_SHEET_HEADERS, GoogleSheetsSyncService, _retry,
-    discover_schema, standardize_business_columns, sync_companies, sync_delivery_tracking_to_sheet,
+    discover_schema, hide_technical_columns, standardize_business_columns, sync_companies, sync_delivery_tracking_to_sheet,
 )
 from app.services.provenance import apply_field
 
@@ -18,6 +18,7 @@ class FakeWorksheet:
         self.rows = []
         self.id = 1
         self.spreadsheet = self
+        self.hidden_columns = []
 
     def get_all_values(self):
         return [row[:] for row in self.rows]
@@ -34,8 +35,8 @@ class FakeWorksheet:
                 self.rows[start - 1].append("")
             self.rows[start - 1][column - 1] = values[0][0]
 
-    def hide_columns(self, *_):
-        pass
+    def hide_columns(self, start, end):
+        self.hidden_columns.append((start, end))
 
     def batch_update(self, updates):
         if isinstance(updates, dict):
@@ -99,6 +100,16 @@ def test_duplicate_headers_are_mapped_by_position() -> None:
         "Действие", "Результат", "Задача",
         "ИТОГ", "Комментарии", "LeadFlow ID",
     )
+
+
+def test_existing_leadflow_id_is_hidden_without_recreating_the_header() -> None:
+    worksheet = FakeWorksheet()
+    worksheet.rows = [list(SHARED_SHEET_HEADERS)]
+
+    hide_technical_columns(worksheet, discover_schema(worksheet.rows))
+
+    # gspread uses zero-based start / exclusive end indexes for this call.
+    assert worksheet.hidden_columns == [(len(SHARED_SHEET_HEADERS) - 1, len(SHARED_SHEET_HEADERS))]
 
 
 def test_realistic_second_row_schema_and_email_status() -> None:

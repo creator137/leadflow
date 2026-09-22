@@ -238,6 +238,23 @@ def _move_column_left(worksheet: Any, source: int, destination: int) -> None:
     _retry(lambda: worksheet.spreadsheet.batch_update(body))
 
 
+def hide_technical_columns(worksheet: Any, schema: SheetSchema) -> None:
+    """Keep the stable row key available to LeadFlow but out of the user's view.
+
+    ``LeadFlow ID`` is deliberately retained in every tab: Apps Script actions,
+    stable row updates and duplicate protection depend on it. Hiding must not
+    be conditional on creating the header, otherwise old tabs keep exposing a
+    developer-facing column forever.
+    """
+    try:
+        _retry(lambda: worksheet.hide_columns(
+            schema.leadflow_id_column - 1, schema.leadflow_id_column,
+        ))
+    except (AttributeError, gspread.exceptions.APIError, requests.RequestException, TransportError):
+        # A visibility request must never prevent business data from syncing.
+        logger.warning("Could not hide technical LeadFlow ID column")
+
+
 def standardize_business_columns(worksheet: Any, rows: list[list[str]]) -> list[list[str]]:
     """Keep one Website column after company phone and align the shared sheet layout A:AB.
 
@@ -470,10 +487,10 @@ class GoogleSheetsSyncService:
         if len(header) < schema.leadflow_id_column or _normalized(header[schema.leadflow_id_column - 1]) != "leadflow id":
             cell = f"{_column_letter(schema.leadflow_id_column)}{schema.header_row}"
             _retry(lambda: worksheet.update(range_name=cell, values=[["LeadFlow ID"]]))
-            try: worksheet.hide_columns(schema.leadflow_id_column - 1, schema.leadflow_id_column)
-            except (AttributeError, gspread.exceptions.APIError): pass
             while len(header) < schema.leadflow_id_column: header.append("")
             header[schema.leadflow_id_column - 1] = "LeadFlow ID"
+        # This also applies to old tabs where the header was already present.
+        hide_technical_columns(worksheet, discover_schema(rows))
 
         companies = list(self.session.scalars(select(Company).join(CompanyDirection, CompanyDirection.company_id == Company.id).where(CompanyDirection.direction_id == direction.id).order_by(CompanyDirection.created_at)))
         by_id = {company.id: company for company in companies}
@@ -623,6 +640,7 @@ def sync_delivery_tracking_to_sheet(
     rows = _retry(worksheet.get_all_values)
     rows = standardize_business_columns(worksheet, rows)
     schema = discover_schema(rows)
+    hide_technical_columns(worksheet, schema)
     row_number = next((
         number for number, row in enumerate(rows[schema.data_row - 1:], start=schema.data_row)
         if len(row) >= schema.leadflow_id_column and row[schema.leadflow_id_column - 1].strip() == delivery.company_id
