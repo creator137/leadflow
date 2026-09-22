@@ -188,16 +188,20 @@ def _human_datetime(value: datetime | None) -> str:
 
 def _style_email_status(worksheet: Any, row_number: int, column: int | None, status: str) -> None:
     """The mail-status cell is system-owned, so response highlighting is safe."""
-    if not column or not hasattr(worksheet, "format"):
+    if not column or not hasattr(worksheet, "format") or not hasattr(worksheet, "spreadsheet"):
         return
-    cell = f"{_column_letter(column)}{row_number}"
     try:
-        _retry(lambda: worksheet.format(cell, {
-            "backgroundColor": {"red": 0.72, "green": 0.9, "blue": 0.72} if status == "Получен ответ" else {"red": 1, "green": 1, "blue": 1},
-            "textFormat": {"bold": status == "Получен ответ"},
-        }))
+        _retry(lambda: worksheet.spreadsheet.batch_update({"requests": [{"repeatCell": {
+            "range": {"sheetId": worksheet.id, "startRowIndex": row_number - 1, "endRowIndex": row_number,
+                      "startColumnIndex": column - 1, "endColumnIndex": column},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": {"red": 0.72, "green": 0.9, "blue": 0.72} if status == "Получен ответ" else {"red": 1, "green": 1, "blue": 1},
+                "textFormat": {"bold": status == "Получен ответ"},
+            }},
+            "fields": "userEnteredFormat(backgroundColor,textFormat.bold)",
+        }}]}))
     except (gspread.exceptions.APIError, requests.RequestException, TransportError):
-        logger.warning("Could not format email status cell %s", cell)
+        logger.warning("Could not format email status cell %s%s", _column_letter(column), row_number)
 
 
 def _text(value: Any) -> str:
