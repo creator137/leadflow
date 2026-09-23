@@ -99,6 +99,31 @@ def test_regional_run_uses_actual_city_and_shared_limit(monkeypatch) -> None:
         assert {company.city for company in session.scalars(select(Company))} == set(seen_cities)
 
 
+def test_regional_run_uses_queried_city_when_source_card_omits_city(monkeypatch) -> None:
+    class NoCityAdapter(SourceAdapter):
+        name = "yandex_maps"
+        def collect(self, spec):
+            yield CompanyLead(
+                source=self.name, source_external_id="missing-city", source_url="https://maps.test/no-city",
+                company_name="Ресторан без города", address="Тестовый адрес", phone="+7 999 111-22-33",
+            )
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction = create_direction(session, DirectionCreate(
+            name="Региональный без города", sheet_tab="Региональный без города", limit_new=1,
+            queries=[DirectionQueryInput(query="ресторан")],
+            locations=[DirectionLocationInput(city="Московская область", region="Московская область", scope="region")],
+            sources=["yandex_maps"],
+        ))
+        monkeypatch.setattr("app.services.direction_collection.build_adapter", lambda *_: NoCityAdapter())
+
+        execute_direction(session, direction, Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+        assert session.scalar(select(Company.city)) == "Апрелевка"
+
+
 def test_direction_limit_is_shared_and_repeat_finds_next(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

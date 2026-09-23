@@ -150,6 +150,12 @@ def execute_direction(
                     continue
                 if not lead.company_name or lead.company_name == "Unknown name":
                     continue
+                # Adapters normally return the city from the card itself. If a
+                # source omits it, retain the concrete city that was queried —
+                # never the umbrella region — so the Company and its Sheet row
+                # remain understandable to the administrator.
+                if not lead.city:
+                    lead.city = location.city
                 run.scanned += 1
                 result = upsert_lead(session, lead)
                 _parser_provenance(session, result.company, lead, location.region)
