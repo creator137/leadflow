@@ -6,6 +6,7 @@ from app.db import Base
 from app.models import Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord, Direction, DirectionLocation, DirectionRun, SearchObservation
 from app.schemas import DirectionCreate, DirectionLocationInput, DirectionQueryInput
 from app.services.direction_collection import execute_direction, expand_locations
+from app.services.region_catalog import available_regions, cities_for_region
 from app.services.directions import create_direction
 from app.sources.base import CompanyLead, SearchSpec, SourceAdapter, SourceBlocked
 
@@ -56,6 +57,15 @@ def test_moscow_oblast_location_expands_to_concrete_cities() -> None:
         assert {item.city for item in expanded} >= {"Химки", "Подольск", "Мытищи"}
         assert all(item.region == "Московская область" for item in expanded)
         assert len({item.key for item in expanded}) == 74
+
+
+def test_catalog_covers_all_supported_russian_subjects() -> None:
+    regions = available_regions()
+
+    assert len(regions) == 85
+    assert len(cities_for_region("Свердловская область")) == 47
+    assert len(cities_for_region("Краснодарский край")) == 26
+    assert not cities_for_region("Несуществующая область")
 
 
 def test_regional_run_uses_actual_city_and_shared_limit(monkeypatch) -> None:
