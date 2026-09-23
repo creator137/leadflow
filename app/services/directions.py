@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Direction, DirectionLocation, DirectionSearchQuery, DirectionSource
 from app.schemas import DirectionCreate, DirectionRead, DirectionUpdate
+from app.services.region_catalog import cities_for_region
 
 DEFAULT_DIRECTION_SCHEDULE = "0 5 * * *"
 
@@ -29,10 +30,16 @@ def serialize_direction(session: Session, direction: Direction) -> DirectionRead
         select(DirectionSource.source).where(DirectionSource.direction_id == direction.id, DirectionSource.active.is_(True))
         .order_by(DirectionSource.source)
     ))
+    serialized_locations = []
+    for location in locations:
+        value = {column.name: getattr(location, column.name) for column in DirectionLocation.__table__.columns}
+        if location.scope == "region":
+            value["cities_count"] = len(cities_for_region(location.region or location.city))
+        serialized_locations.append(value)
     return DirectionRead.model_validate({
         **{column.name: getattr(direction, column.name) for column in Direction.__table__.columns},
         "queries": queries,
-        "locations": locations,
+        "locations": serialized_locations,
         "sources": sources,
     })
 
@@ -53,8 +60,25 @@ def replace_children(session: Session, direction: Direction, payload: DirectionC
         session.execute(delete(DirectionSearchQuery).where(DirectionSearchQuery.direction_id == direction.id))
         session.add_all(DirectionSearchQuery(direction_id=direction.id, **item.model_dump()) for item in payload.queries)
     if payload.locations is not None:
+        for item in payload.locations:
+            if item.scope != "region":
+                continue
+            region = (item.region or item.city).strip()
+            if not cities_for_region(region):
+                raise ValueError(f"Область «{region}» пока не поддерживается. Выберите область из списка.")
         session.execute(delete(DirectionLocation).where(DirectionLocation.direction_id == direction.id))
-        session.add_all(DirectionLocation(direction_id=direction.id, **item.model_dump()) for item in payload.locations)
+        session.add_all(
+            DirectionLocation(
+                direction_id=direction.id,
+                # A region location still has a non-empty city column for
+                # backwards-compatible database constraints and uniqueness.
+                city=(item.region or item.city).strip() if item.scope == "region" else item.city.strip(),
+                region=(item.region or item.city).strip() if item.scope == "region" else item.region,
+                scope=item.scope,
+                active=item.active,
+            )
+            for item in payload.locations
+        )
     if payload.sources is not None:
         session.execute(delete(DirectionSource).where(DirectionSource.direction_id == direction.id))
         session.add_all(DirectionSource(direction_id=direction.id, source=source) for source in dict.fromkeys(payload.sources))

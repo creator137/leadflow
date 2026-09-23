@@ -36,6 +36,7 @@ from app.services.company_enrichment import CompanyEnrichmentService
 from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.data_quality import backfill_structured_business_fields
 from app.services.directions import archive_direction, create_direction, serialize_direction, update_direction
+from app.services.region_catalog import available_regions
 from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_config, sync_companies, worksheet_from_config
 from app.services.mailing import build_delivery, diagnose_imap, diagnose_smtp, execute_campaign, process_queue, render_template_parts, sender_template_context, send_delivery
 from app.services.deepseek import DeepSeekClient, DeepSeekError, ai_settings as get_ai_settings
@@ -260,6 +261,12 @@ def directions(
     if not include_inactive:
         query = query.where(Direction.active.is_(True))
     return [serialize_direction(session, item) for item in session.scalars(query)]
+
+
+@app.get("/api/search-regions")
+def search_regions() -> list[dict[str, object]]:
+    """Regions that LeadFlow can safely expand into concrete search cities."""
+    return available_regions()
 
 
 @app.post("/api/directions", response_model=DirectionRead, status_code=201)

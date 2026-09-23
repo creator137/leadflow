@@ -3,9 +3,9 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import Base
-from app.models import Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord, Direction, DirectionRun, SearchObservation
+from app.models import Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord, Direction, DirectionLocation, DirectionRun, SearchObservation
 from app.schemas import DirectionCreate, DirectionLocationInput, DirectionQueryInput
-from app.services.direction_collection import execute_direction
+from app.services.direction_collection import execute_direction, expand_locations
 from app.services.directions import create_direction
 from app.sources.base import CompanyLead, SearchSpec, SourceAdapter, SourceBlocked
 
@@ -36,6 +36,57 @@ def make_direction(session: Session, limit: int = 2):
         locations=[DirectionLocationInput(city="Москва")],
         sources=["yandex_maps", "two_gis"],
     ))
+
+
+def test_moscow_oblast_location_expands_to_concrete_cities() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction = create_direction(session, DirectionCreate(
+            name="Область", sheet_tab="Область", limit_new=50,
+            queries=[DirectionQueryInput(query="ресторан")],
+            locations=[DirectionLocationInput(city="Московская область", region="Московская область", scope="region")],
+            sources=["yandex_maps"],
+        ))
+        location = session.scalar(select(DirectionLocation).where(DirectionLocation.direction_id == direction.id))
+
+        expanded = expand_locations([location])
+
+        assert len(expanded) == 74
+        assert {item.city for item in expanded} >= {"Химки", "Подольск", "Мытищи"}
+        assert all(item.region == "Московская область" for item in expanded)
+        assert len({item.key for item in expanded}) == 74
+
+
+def test_regional_run_uses_actual_city_and_shared_limit(monkeypatch) -> None:
+    seen_cities = []
+
+    class RegionAdapter(SourceAdapter):
+        name = "yandex_maps"
+        def collect(self, spec):
+            seen_cities.append(spec.city)
+            yield CompanyLead(
+                source=self.name, source_external_id=f"region-{spec.city}",
+                source_url=f"https://maps.test/{spec.city}", company_name=f"Ресторан {spec.city}",
+                city=spec.city, address=f"{spec.city}, 1", phone=f"+7 999 100 00 {len(seen_cities):02d}",
+            )
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction = create_direction(session, DirectionCreate(
+            name="Региональный", sheet_tab="Региональный", limit_new=3,
+            queries=[DirectionQueryInput(query="ресторан")],
+            locations=[DirectionLocationInput(city="Московская область", region="Московская область", scope="region")],
+            sources=["yandex_maps"],
+        ))
+        monkeypatch.setattr("app.services.direction_collection.build_adapter", lambda *_: RegionAdapter())
+
+        run = execute_direction(session, direction, Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+        assert run.inserted == 3
+        assert len(seen_cities) == 3
+        assert {company.city for company in session.scalars(select(Company))} == set(seen_cities)
 
 
 def test_direction_limit_is_shared_and_repeat_finds_next(monkeypatch) -> None:

@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -73,3 +74,17 @@ def test_active_direction_cannot_accidentally_lose_daily_schedule() -> None:
         session.commit()
         update_direction(session, direction, DirectionUpdate(active=True))
         assert direction.schedule == "0 5 * * *"
+
+
+def test_region_location_requires_supported_catalog_region() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        payload = DirectionCreate(
+            name="Тест области", sheet_tab="Тест области", active=True,
+            queries=[DirectionQueryInput(query="ресторан")],
+            locations=[DirectionLocationInput(city="Несуществующая область", region="Несуществующая область", scope="region")],
+            sources=["yandex_maps"],
+        )
+        with pytest.raises(ValueError, match="пока не поддерживается"):
+            create_direction(session, payload)

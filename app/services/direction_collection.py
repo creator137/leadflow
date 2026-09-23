@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -14,6 +15,7 @@ from app.models import (
 )
 from app.services.dedup import upsert_lead
 from app.services.provenance import apply_field
+from app.services.region_catalog import cities_for_region
 from app.sources.base import SearchSpec, SourceBlocked
 from app.sources.factory import build_adapter
 
@@ -60,6 +62,34 @@ def _parser_provenance(session: Session, company, lead, region: str | None) -> N
             )
 
 
+@dataclass(frozen=True)
+class SearchLocation:
+    """One concrete city query, derived from a city or a saved region."""
+    key: str
+    city: str
+    region: str | None
+
+
+def expand_locations(locations: list[DirectionLocation]) -> list[SearchLocation]:
+    """Turn regional settings into source-safe city queries.
+
+    The saved row remains one human-readable region setting. Expansion happens
+    only while a run is executing, so Google Sheets still receives the actual
+    city returned by each source and no extra direction settings are created.
+    """
+    expanded: list[SearchLocation] = []
+    for location in locations:
+        if location.scope == "region":
+            region = location.region or location.city
+            expanded.extend(
+                SearchLocation(key=f"{location.id}:{city}", city=city, region=region)
+                for city in cities_for_region(region)
+            )
+        else:
+            expanded.append(SearchLocation(key=location.id, city=location.city, region=location.region))
+    return expanded
+
+
 def execute_direction(
     session: Session,
     direction: Direction,
@@ -73,9 +103,10 @@ def execute_direction(
     run.finished_at = None
     session.commit()
 
-    locations = list(session.scalars(select(DirectionLocation).where(
+    saved_locations = list(session.scalars(select(DirectionLocation).where(
         DirectionLocation.direction_id == direction.id, DirectionLocation.active.is_(True),
     ).order_by(DirectionLocation.city)))
+    locations = expand_locations(saved_locations)
     queries = list(session.scalars(select(DirectionSearchQuery).where(
         DirectionSearchQuery.direction_id == direction.id, DirectionSearchQuery.active.is_(True),
     ).order_by(DirectionSearchQuery.priority, DirectionSearchQuery.created_at)))
@@ -93,7 +124,7 @@ def execute_direction(
         remaining = run.limit_new - run.inserted
         if remaining <= 0:
             break
-        cursor_key = f"{location.id}:{query.id}:{source.id}"
+        cursor_key = f"{location.key}:{query.id}:{source.id}"
         cursor_offset = max(0, int((search_cursor.get(cursor_key) or {}).get("offset", 0)))
         scan_step = max(30, remaining * 5)
         scan_limit = min(settings.source_max_scan, max(remaining, cursor_offset + scan_step))

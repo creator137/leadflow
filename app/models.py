@@ -107,6 +107,9 @@ class DirectionLocation(Base):
     direction_id: Mapped[str] = mapped_column(ForeignKey("directions.id", ondelete="CASCADE"), index=True)
     city: Mapped[str] = mapped_column(String(255), nullable=False)
     region: Mapped[str | None] = mapped_column(String(255))
+    # ``region`` means the parser should expand this one saved setting into
+    # its catalogued cities before querying a source.
+    scope: Mapped[str] = mapped_column(String(16), default="city", nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     __table_args__ = (UniqueConstraint("direction_id", "city", "region", name="uq_direction_location"),)

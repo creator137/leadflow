@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from apscheduler.triggers.cron import CronTrigger
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ORMModel(BaseModel):
@@ -67,7 +67,14 @@ class DirectionQueryInput(BaseModel):
 class DirectionLocationInput(BaseModel):
     city: str = Field(min_length=1, max_length=255)
     region: str | None = Field(default=None, max_length=255)
+    scope: Literal["city", "region"] = "city"
     active: bool = True
+
+    @model_validator(mode="after")
+    def region_requires_a_region_name(self):
+        if self.scope == "region" and not (self.region or self.city).strip():
+            raise ValueError("Для поиска по области укажите область.")
+        return self
 
 
 class DirectionCreate(BaseModel):
@@ -156,6 +163,7 @@ class DirectionQueryRead(DirectionQueryInput, ORMModel):
 
 class DirectionLocationRead(DirectionLocationInput, ORMModel):
     id: str
+    cities_count: int | None = None
 
 
 class DirectionRead(ORMModel):
