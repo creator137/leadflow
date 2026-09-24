@@ -18,14 +18,14 @@ from app.db import SessionLocal, get_db
 from app.models import (
     AIConfig, Campaign, Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord,
     Direction, DirectionAttachment, DirectionProposalTemplate, DirectionRun, EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun,
-    MailAccount, ParserRun, PhraseSearchResult, PhraseSearchRun, SheetPersonalizationDraft, SheetRowMapping, SourceJob, Suppression, TrackedLink,
+    MailAccount, ParserRun, PhraseSearchResult, PhraseSearchRun, ProductSearchResult, ProductSearchRun, ProductSearchSheetConfig, SheetPersonalizationDraft, SheetRowMapping, SourceJob, Suppression, TrackedLink,
 )
 from app.schemas import (
     AIConfigCreate, AIConfigRead, CampaignCreate, CampaignRead, CampaignUpdate, CompanyRead, CompanyUpdate,
     DeliveryRead, DirectionCreate, DirectionRead, DirectionRunRead, DirectionUpdate, DirectionWizardCreate, EmailTemplateCreate,
     EmailTemplateRead, EmailTemplateUpdate, GoogleSheetsConfigCreate, GoogleSheetsConfigRead, MailAccountCreate,
     MailAccountRead, MailAccountUpdate, ManualSendCreate, ParserRunRead, SuppressionCreate, TemplatePreview, TemplateTestSend,
-    AISettingsUpdate, PersonalizationPreviewCreate, PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead,
+    AISettingsUpdate, PersonalizationPreviewCreate, PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead, ProductSearchCreate, ProductSearchRunRead, ProductSearchSheetConfigRead, ProductSearchSheetConfigUpdate, ProductSearchSelectionUpdate, ProductSearchSendCreate,
     ProposalDraftCreate, ProposalDraftUpdate, ProposalTemplateUpdate, ProposalTestSend, SenderSettingsUpdate,
     SheetActionRequest, SourceJobCreate, SourceJobRead, SourceJobUpdate,
 )
@@ -58,6 +58,7 @@ from app.services.provenance import apply_field
 from app.services.user_errors import human_error
 from app.services.email_events import record_email_event, sync_email_event_to_sheets
 from app.sources.phrase_search import execute_phrase_search
+from app.services.product_search import execute_product_search, product_sheet_config, read_product_sheet_selection, send_selected_supplier_requests, serialize_product_result, sync_product_results
 
 app = FastAPI(title="LeadFlow", version="0.1.0")
 STATIC_DIR = Path(__file__).parent / "static"
@@ -1306,6 +1307,86 @@ def phrase_search_results(limit: int = Query(200, ge=1, le=500), session: Sessio
              "company_name": item.company_name, "website": item.website, "email": item.email,
              "phone": item.phone, "extraction_method": item.extraction_method, "status": item.status,
              "evidence": item.evidence, "error": item.error} for item, _run, direction in rows]
+
+
+def _product_search_background(run_id: str) -> None:
+    with SessionLocal() as session:
+        run = session.get(ProductSearchRun, run_id)
+        if run:
+            execute_product_search(session, run, get_settings())
+
+
+@app.get("/api/product-search/config", response_model=ProductSearchSheetConfigRead)
+def get_product_search_config(session: Session = Depends(get_db)) -> ProductSearchSheetConfig:
+    return product_sheet_config(session)
+
+
+@app.put("/api/product-search/config", response_model=ProductSearchSheetConfigRead)
+def update_product_search_config(payload: ProductSearchSheetConfigUpdate, session: Session = Depends(get_db)) -> ProductSearchSheetConfig:
+    row = product_sheet_config(session)
+    for key, value in payload.model_dump().items():
+        setattr(row, key, value)
+    session.commit(); session.refresh(row)
+    return row
+
+
+@app.post("/api/product-search", response_model=ProductSearchRunRead, status_code=202)
+def product_search(payload: ProductSearchCreate, tasks: BackgroundTasks, session: Session = Depends(get_db)) -> ProductSearchRun:
+    run = ProductSearchRun(**payload.model_dump())
+    session.add(run); session.commit(); session.refresh(run)
+    tasks.add_task(_product_search_background, run.id)
+    return run
+
+
+@app.get("/api/product-search/runs", response_model=list[ProductSearchRunRead])
+def product_search_runs(session: Session = Depends(get_db)) -> list[ProductSearchRun]:
+    return list(session.scalars(select(ProductSearchRun).order_by(ProductSearchRun.created_at.desc()).limit(100)))
+
+
+@app.get("/api/product-search/results")
+def product_search_results(limit: int = Query(300, ge=1, le=500), session: Session = Depends(get_db)) -> list[dict[str, object]]:
+    return [serialize_product_result(row) for row in session.scalars(
+        select(ProductSearchResult).order_by(ProductSearchResult.created_at.desc()).limit(limit)
+    )]
+
+
+@app.patch("/api/product-search/results/{result_id}")
+def update_product_search_result(result_id: str, payload: ProductSearchSelectionUpdate, session: Session = Depends(get_db)) -> dict[str, object]:
+    row = session.get(ProductSearchResult, result_id)
+    if not row:
+        raise HTTPException(404, "Результат не найден.")
+    row.selected = payload.selected
+    session.commit()
+    try:
+        sync_product_results(session, get_settings())
+    except Exception:
+        # A temporary Sheets issue must not make the user's local selection
+        # disappear.  It will be synced after the next successful operation.
+        session.rollback()
+    return serialize_product_result(row)
+
+
+@app.post("/api/product-search/sync")
+def sync_product_search(session: Session = Depends(get_db)) -> dict[str, int]:
+    try:
+        read_product_sheet_selection(session, get_settings())
+        return sync_product_results(session, get_settings())
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/product-search/send")
+def send_product_search_requests(payload: ProductSearchSendCreate, session: Session = Depends(get_db)) -> dict[str, int]:
+    try:
+        # Pull visible Google Sheets checkboxes immediately before sending; the
+        # product table is the user's source of truth for batch selection.
+        read_product_sheet_selection(session, get_settings())
+        return send_selected_supplier_requests(
+            session, get_settings(), mailbox_id=payload.mailbox_id, subject=payload.subject,
+            text_body=payload.text_body, result_ids=payload.result_ids or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/google-sheets/actions/{action}")

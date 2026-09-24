@@ -663,3 +663,80 @@ class PhraseSearchResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     __table_args__ = (UniqueConstraint("run_id", "source_url", name="uq_phrase_result_run_url"),)
+
+
+# Supplier/product research deliberately has its own data set.  A supplier is
+# not a CRM lead until an administrator chooses to work with it, therefore it
+# must never be inserted into ``companies`` as a side effect of a search.
+class ProductSearchSheetConfig(Base):
+    __tablename__ = "product_search_sheet_config"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
+    spreadsheet_id: Mapped[str | None] = mapped_column(String(255))
+    worksheet_name: Mapped[str] = mapped_column(String(255), default="Поиск товаров")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ProductSearchRun(Base):
+    __tablename__ = "product_search_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    city: Mapped[str | None] = mapped_column(String(255), index=True)
+    region: Mapped[str | None] = mapped_column(String(255), index=True)
+    limit: Mapped[int] = mapped_column(Integer, default=20)
+    use_ai: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    urls_discovered: Mapped[int] = mapped_column(Integer, default=0)
+    result_count: Mapped[int] = mapped_column(Integer, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProductSearchResult(Base):
+    __tablename__ = "product_search_results"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("product_search_runs.id", ondelete="CASCADE"), index=True)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    product_url: Mapped[str | None] = mapped_column(Text)
+    company_name: Mapped[str | None] = mapped_column(Text)
+    region: Mapped[str | None] = mapped_column(String(255))
+    city: Mapped[str | None] = mapped_column(String(255))
+    website: Mapped[str | None] = mapped_column(Text)
+    email: Mapped[str | None] = mapped_column(String(320), index=True)
+    phone: Mapped[str | None] = mapped_column(String(255))
+    product_name: Mapped[str | None] = mapped_column(Text)
+    price: Mapped[str | None] = mapped_column(String(255))
+    extraction_method: Mapped[str] = mapped_column(String(32), default="deterministic")
+    status: Mapped[str] = mapped_column(String(32), default="found", index=True)
+    selected: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(Text)
+    sheet_row: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (UniqueConstraint("run_id", "source_url", name="uq_product_result_run_url"),)
+
+
+class ProductSearchDelivery(Base):
+    """A manually approved supplier enquiry, separate from CRM outreach."""
+    __tablename__ = "product_search_deliveries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    result_id: Mapped[str] = mapped_column(ForeignKey("product_search_results.id", ondelete="CASCADE"), nullable=False, index=True)
+    mailbox_id: Mapped[str] = mapped_column(ForeignKey("mail_accounts.id"), nullable=False, index=True)
+    recipient_email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    text_body: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    message_id: Mapped[str | None] = mapped_column(String(998), unique=True)
+    error: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (UniqueConstraint("result_id", "recipient_email", name="uq_product_delivery_recipient"),)

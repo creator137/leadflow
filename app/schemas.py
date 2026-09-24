@@ -522,6 +522,55 @@ class PhraseSearchRead(ORMModel):
     finished_at: datetime | None
 
 
+class ProductSearchCreate(BaseModel):
+    query: str = Field(min_length=3, max_length=500)
+    city: str | None = Field(default=None, max_length=255)
+    region: str | None = Field(default=None, max_length=255)
+    limit: int = Field(default=20, ge=1, le=100)
+    use_ai: bool = True
+
+
+class ProductSearchSheetConfigUpdate(BaseModel):
+    spreadsheet_id: str | None = Field(default=None, max_length=255)
+    worksheet_name: str = Field(default="Поиск товаров", min_length=1, max_length=255)
+    active: bool = True
+
+
+class ProductSearchSheetConfigRead(ORMModel):
+    id: str
+    spreadsheet_id: str | None
+    worksheet_name: str
+    active: bool
+    updated_at: datetime
+
+
+class ProductSearchRunRead(ORMModel):
+    id: str
+    query: str
+    city: str | None
+    region: str | None
+    limit: int
+    use_ai: bool
+    status: str
+    urls_discovered: int
+    result_count: int
+    duplicate_count: int
+    error: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class ProductSearchSelectionUpdate(BaseModel):
+    selected: bool
+
+
+class ProductSearchSendCreate(BaseModel):
+    mailbox_id: str = Field(min_length=1, max_length=36)
+    subject: str = Field(min_length=1, max_length=500)
+    text_body: str = Field(min_length=1, max_length=20_000)
+    result_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
 class SheetActionRequest(BaseModel):
     company_id: str = Field(min_length=1, max_length=36)
 
