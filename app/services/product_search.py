@@ -193,20 +193,20 @@ def sync_product_results(session: Session, settings: Settings) -> dict[str, int]
     # diagnostics (irrelevant pages, duplicates and fetch errors) remain in the
     # run history/API, but must not create empty rows for the user.
     visible_statuses = {"found", "sent"}
-    hidden_rows = sorted(
-        (item.sheet_row for item in results if item.status not in visible_statuses and item.sheet_row),
-        reverse=True,
-    )
-    for row_number in hidden_rows:
-        try:
-            worksheet.delete_rows(row_number)
-        except Exception:
-            pass
-        for item in results:
-            if item.sheet_row == row_number:
-                item.sheet_row = None
-        rows = worksheet.get_all_values()
+    # Rebuild the data area: this dedicated worksheet is a projection of the
+    # current run results, so stale diagnostic rows must disappear rather than
+    # remain as blank/error records. Preserve the user's checkbox selection by
+    # stable result ID.
+    selected_by_id = {row[id_index]: row[0] for row in rows[1:] if len(row) > id_index and row[id_index]}
+    worksheet.batch_clear([f"A2:L{max(2, len(rows) + 1)}"])
     for item in results:
+        item.selected = selected_by_id.get(item.id, "FALSE") == "TRUE"
+        item.sheet_row = None
+    rows = [list(SHEET_HEADERS)]
+    by_id = {}
+    for item in results:
+        if item.status not in visible_statuses:
+            continue
         value = [
             "TRUE" if item.selected else "FALSE", item.company_name or "", item.region or "", item.city or "", item.website or "",
             item.email or "", item.phone or "", item.product_name or "", item.price or "", item.product_url or "",
