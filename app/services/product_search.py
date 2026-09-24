@@ -208,7 +208,7 @@ def sync_product_results(session: Session, settings: Settings) -> dict[str, int]
         if item.status not in visible_statuses:
             continue
         value = [
-            "TRUE" if item.selected else "FALSE", item.company_name or "", item.region or "", item.city or "", item.website or "",
+            bool(item.selected), item.company_name or "", item.region or "", item.city or "", item.website or "",
             item.email or "", item.phone or "", item.product_name or "", item.price or "", item.product_url or "",
             {"found": "Найдено", "duplicate": "Дубль", "irrelevant": "Нерелевантно", "error": "Ошибка", "sent": "Отправлено"}.get(item.status, item.status), item.id,
         ]
@@ -226,7 +226,7 @@ def sync_product_results(session: Session, settings: Settings) -> dict[str, int]
     # Google Sheets checkboxes are an affordance, not an identifier.  The
     # stable result ID stays in a hidden last column.
     try:
-        worksheet.add_validation(f"A2:A1000", "boolean", ["TRUE", "FALSE"], strict=True)
+        worksheet.add_validation(f"A2:A1000", "boolean", [], strict=True)
         worksheet.spreadsheet.batch_update({"requests": [{"updateDimensionProperties": {"range": {"sheetId": worksheet.id, "dimension": "COLUMNS", "startIndex": id_index, "endIndex": id_index + 1}, "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}}]})
     except Exception:
         pass
