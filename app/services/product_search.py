@@ -226,8 +226,10 @@ def sync_product_results(session: Session, settings: Settings) -> dict[str, int]
     # Google Sheets checkboxes are an affordance, not an identifier.  The
     # stable result ID stays in a hidden last column.
     try:
-        worksheet.add_validation(f"A2:A1000", "boolean", [], strict=True)
-        worksheet.spreadsheet.batch_update({"requests": [{"updateDimensionProperties": {"range": {"sheetId": worksheet.id, "dimension": "COLUMNS", "startIndex": id_index, "endIndex": id_index + 1}, "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}}]})
+        worksheet.spreadsheet.batch_update({"requests": [
+            {"setDataValidation": {"range": {"sheetId": worksheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 1}, "rule": {"condition": {"type": "BOOLEAN"}, "strict": True, "showCustomUi": True}}},
+            {"updateDimensionProperties": {"range": {"sheetId": worksheet.id, "dimension": "COLUMNS", "startIndex": id_index, "endIndex": id_index + 1}, "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}},
+        ]})
     except Exception:
         pass
     session.commit()
