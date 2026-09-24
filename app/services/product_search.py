@@ -189,6 +189,23 @@ def sync_product_results(session: Session, settings: Settings) -> dict[str, int]
     by_id = {row[id_index]: number for number, row in enumerate(rows[1:], start=2) if len(row) > id_index and row[id_index]}
     inserted = updated = 0
     results = list(session.scalars(select(ProductSearchResult).order_by(ProductSearchResult.created_at)))
+    # Only usable supplier records belong in the working sheet.  Discovery
+    # diagnostics (irrelevant pages, duplicates and fetch errors) remain in the
+    # run history/API, but must not create empty rows for the user.
+    visible_statuses = {"found", "sent"}
+    hidden_rows = sorted(
+        (item.sheet_row for item in results if item.status not in visible_statuses and item.sheet_row),
+        reverse=True,
+    )
+    for row_number in hidden_rows:
+        try:
+            worksheet.delete_rows(row_number)
+        except Exception:
+            pass
+        for item in results:
+            if item.sheet_row == row_number:
+                item.sheet_row = None
+        rows = worksheet.get_all_values()
     for item in results:
         value = [
             "TRUE" if item.selected else "FALSE", item.company_name or "", item.region or "", item.city or "", item.website or "",
@@ -197,10 +214,12 @@ def sync_product_results(session: Session, settings: Settings) -> dict[str, int]
         ]
         row_number = by_id.get(item.id)
         if row_number:
-            worksheet.update(f"A{row_number}:L{row_number}", [value])
+            # RAW prevents phone numbers such as +7... from being interpreted
+            # as spreadsheet formulas (#ERROR!).
+            worksheet.update(f"A{row_number}:L{row_number}", [value], value_input_option="RAW")
             updated += 1
         else:
-            worksheet.append_row(value, value_input_option="USER_ENTERED")
+            worksheet.append_row(value, value_input_option="RAW")
             row_number = len(rows) + inserted + 1
             inserted += 1
         item.sheet_row = row_number
