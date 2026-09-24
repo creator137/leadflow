@@ -28,6 +28,7 @@ from app.services.google_sheets import active_sheets_config, worksheet_from_conf
 from app.services.mailing import now_utc, safe_mail_error, smtp_connection
 from app.services.recipients import normalize_email, valid_email
 from app.services.secrets import decrypt_secret
+from app.services.region_catalog import available_regions, cities_for_region
 from app.sources.phrase_search.service import EMAIL_RE, PHONE_RE, FreeSearchProvider, _organization_metadata, _page_evidence
 
 PRICE_RE = re.compile(r"(?:от\s*)?(\d[\d\s]{0,12}(?:[,.]\d{1,2})?\s*(?:₽|руб(?:\.|лей)?))", re.I)
@@ -93,8 +94,27 @@ def execute_product_search(session: Session, run: ProductSearchRun, settings: Se
     run.status = "running"
     session.commit()
     try:
-        query = " ".join(part for part in (run.query, run.city, run.region) if part)
-        urls = FreeSearchProvider().search(query, run.limit)
+        # A regional run expands to real cities from our catalog.  The single
+        # limit is shared by the whole run, so “Все регионы России” means up
+        # to N total companies, not N per region.
+        if (run.region or "").strip().casefold() == "все регионы россии":
+            queries = []
+            for region in available_regions():
+                for city in cities_for_region(str(region["name"]))[:2]:
+                    queries.append(" ".join(part for part in (run.query, city, str(region["name"])) if part))
+        else:
+            queries = [" ".join(part for part in (run.query, run.city, run.region) if part)]
+        urls = []
+        seen_urls = set()
+        provider = FreeSearchProvider()
+        for query in queries:
+            for url in provider.search(query, min(run.limit, 10)):
+                if url not in seen_urls:
+                    urls.append(url)
+                    seen_urls.add(url)
+            if len(urls) >= run.limit:
+                break
+        urls = urls[:run.limit]
         run.urls_discovered = len(urls)
         session.commit()
         seen_sites: set[str] = set()
