@@ -9,8 +9,8 @@ from playwright.sync_api import sync_playwright
 
 
 PAGES = [
-    "home", "companies", "directions", "phraseSearch", "campaigns", "letters", "templates",
-    "proposals", "mailboxes", "sender", "sheets", "analytics", "settings",
+    "home", "companies", "directions", "phraseSearch", "productSearch", "campaigns", "letters",
+    "templates", "proposals", "mailboxes", "sender", "sheets", "analytics", "settings", "help",
 ]
 VIEWPORTS = [(1920, 1080, "desktop"), (1366, 768, "laptop"), (390, 844, "mobile")]
 BASE_URL = os.getenv("BROWSER_BASE_URL", "http://127.0.0.1:8000/")

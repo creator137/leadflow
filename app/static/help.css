@@ -1,0 +1,26 @@
+.sidebar{overflow-y:auto}
+.help-hero{background:linear-gradient(125deg,#173d36,#2d6b5f);color:#fff;border-radius:1rem;padding:26px}
+.help-hero .form-control{border:0;box-shadow:0 8px 24px #102d2740}
+.help-layout{display:grid;grid-template-columns:250px minmax(0,1fr);gap:24px;align-items:start}
+.help-nav{position:sticky;top:24px;border:1px solid var(--line);border-radius:1rem;background:#fff;padding:12px}
+.help-nav button{display:block;width:100%;border:0;border-radius:.65rem;background:transparent;color:#425550;padding:.62rem .7rem;text-align:left;font-size:.88rem}
+.help-nav button:hover,.help-nav button:focus{background:#eaf2ef;color:var(--brand)}
+.help-topic{scroll-margin-top:24px;border:1px solid var(--line);border-radius:1rem;background:#fff;padding:24px;margin-bottom:18px}
+.help-topic h2{font-size:1.25rem;margin-bottom:.35rem}
+.help-topic h3{font-size:1rem;margin:1.25rem 0 .55rem}
+.help-topic ol,.help-topic ul{padding-left:1.25rem}
+.help-topic li{margin-bottom:.5rem}
+.help-topic code{color:#234d44;background:#edf4f1;border-radius:.3rem;padding:.1rem .3rem;white-space:normal}
+.help-note{border-left:4px solid #5b8f83;border-radius:.55rem;background:#eef6f3;padding:12px 14px;margin:14px 0}
+.help-warning{border-left-color:#c17738;background:#fff4e8}
+.help-example{border:1px dashed #9fbcb5;border-radius:.7rem;background:#f8fbfa;padding:14px;margin:14px 0}
+.help-fields{display:grid;grid-template-columns:minmax(145px,.7fr) 2fr;gap:0;border-top:1px solid var(--line)}
+.help-fields dt,.help-fields dd{margin:0;padding:.55rem 0;border-bottom:1px solid var(--line)}
+.help-fields dt{padding-right:14px;color:#526661}
+.help-fields dd{font-weight:400}
+.help-empty{display:none}
+.help-topic[hidden]{display:none!important}
+.help-faq details{border-top:1px solid var(--line);padding:.8rem 0}
+.help-faq summary{cursor:pointer;font-weight:650}
+@media(max-width:991.98px){.help-layout{grid-template-columns:1fr}.help-nav{position:static;display:flex;gap:6px;overflow-x:auto}.help-nav button{width:auto;min-width:max-content}.help-topic{padding:20px}}
+@media(max-width:575.98px){.help-hero{padding:20px}.help-topic{padding:17px}.help-fields{grid-template-columns:1fr}.help-fields dt{padding-bottom:.1rem;border-bottom:0}.help-fields dd{padding-top:.1rem}}
