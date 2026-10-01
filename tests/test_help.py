@@ -26,7 +26,8 @@ def test_help_covers_every_visible_admin_section_and_critical_workflows() -> Non
 
     for required_instruction in (
         "Подготовить КП", "Отправить тест", "Отправить письмо", "Синхронизировать сейчас",
-        "Куда пересылать ответы клиентов", "Дневной лимит", "Вложения", "Типовые ошибки",
+        "Куда пересылать ответы клиентов", "Дневной лимит", "Создать рассылку", "Вложения",
+        "Типовые ошибки",
     ):
         assert required_instruction in help_text
 
