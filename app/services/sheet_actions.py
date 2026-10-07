@@ -106,6 +106,8 @@ def execute_sheet_action(session: Session, company_id: str, action: str, setting
             return {"status": "КП подготовлено", "preview_url": preview_url, "duplicate": False}
         if not draft or draft.status not in {"ready", "sent"}: raise ValueError("Сначала подготовьте КП")
         already_sent = bool(draft.delivery_id)
+        if not already_sent:
+            draft = refresh_draft_recipient_from_sheet(session, draft, company, recipient_fields)
         delivery = send_sheet_draft(session, draft.id, settings)
         if delivery.status == "queued":
             send_delivery(session, delivery, mailbox)

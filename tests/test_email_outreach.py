@@ -21,6 +21,15 @@ class FakeSMTP:
     def send_message(self, message): self.message = message; return {}
 
 
+class FakeSentIMAP:
+    def __init__(self): self.appended = []
+    def login(self, *_): return "OK", []
+    def list(self): return "OK", [b'(\\HasNoChildren \\Sent) "|" "Sent"']
+    def append(self, folder, flags, internaldate, message):
+        self.appended.append((folder, flags, internaldate, message)); return "OK", [b"saved"]
+    def logout(self): return "BYE", []
+
+
 class FakeIMAP:
     def __init__(self, messages): self.messages, self.selected = messages, ""
     def __enter__(self): return self
@@ -163,7 +172,9 @@ def test_daily_mailbox_limit_applies_to_one_off_sends(db: Session) -> None:
 def test_atomic_claim_and_send_updates_company(db: Session, monkeypatch) -> None:
     _, company, account, template = setup(db)
     delivery = build_delivery(db, company, account, template, Settings(public_base_url="https://lead.test"))
-    monkeypatch.setattr("app.services.mailing.smtp_connection", lambda _: FakeSMTP())
+    smtp, imap = FakeSMTP(), FakeSentIMAP()
+    monkeypatch.setattr("app.services.mailing.smtp_connection", lambda _: smtp)
+    monkeypatch.setattr("app.services.mailing.imap_connection", lambda _: imap)
     claimed = claim_delivery(db, "worker-a")
     assert claimed == delivery.id
     assert claim_delivery(db, "worker-b") is None
@@ -171,7 +182,28 @@ def test_atomic_claim_and_send_updates_company(db: Session, monkeypatch) -> None
     db.refresh(company); db.refresh(delivery)
     assert delivery.message_id and delivery.sent_at and delivery.attempt_count == 1
     assert company.action == "Отправлено предложение" and company.communication_started_at
+    assert len(imap.appended) == 1
+    folder, flags, _internaldate, raw_message = imap.appended[0]
+    assert folder == "Sent" and flags == r"(\Seen)"
+    assert delivery.message_id.encode() in raw_message
+    assert delivery.recipient_email.encode() in raw_message
     assert [row.event_type for row in db.scalars(select(EmailEvent).order_by(EmailEvent.occurred_at))] == ["queued", "sending", "sent"]
+
+
+def test_sent_copy_failure_does_not_resend_or_downgrade_delivery(db: Session, monkeypatch) -> None:
+    _, company, account, template = setup(db)
+    delivery = build_delivery(db, company, account, template, Settings(public_base_url="https://lead.test"))
+    smtp = FakeSMTP()
+    monkeypatch.setattr("app.services.mailing.smtp_connection", lambda _: smtp)
+    monkeypatch.setattr(
+        "app.services.mailing.save_sent_copy",
+        lambda *_: (_ for _ in ()).throw(OSError("IMAP unavailable")),
+    )
+    claimed = claim_delivery(db, "worker-a")
+    assert claimed == delivery.id
+    assert send_claimed_delivery(db, delivery.id, "worker-a") == "sent"
+    db.refresh(delivery)
+    assert delivery.status == "sent" and delivery.attempt_count == 1
 
 
 def test_unavailable_mailbox_records_error_and_defers_retry(db: Session) -> None:

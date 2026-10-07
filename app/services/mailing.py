@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import imaplib
+import logging
 import re
 import secrets
 import smtplib
@@ -28,6 +29,7 @@ HREF_RE = re.compile(r'(<a\b[^>]*?\bhref=["\'])(https?://[^"\']+)(["\'])', re.I)
 INLINE_LOGO_RE = re.compile(r'https?://[^"\']+/email-assets/bogorodsky-pryanik-logo\.jpg', re.I)
 INLINE_LOGO_CID = "bogorodsky-pryanik-logo"
 template_env = Environment(autoescape=select_autoescape(["html", "xml"]), undefined=StrictUndefined)
+logger = logging.getLogger(__name__)
 
 
 def now_utc() -> datetime:
@@ -147,6 +149,47 @@ def imap_connection(account: MailAccount):
     client = imaplib.IMAP4(account.imap_host, account.imap_port, timeout=20)
     if account.imap_security == "starttls": client.starttls()
     return client
+
+
+def _sent_folder(client: imaplib.IMAP4) -> str:
+    status, rows = client.list()
+    if status != "OK":
+        raise imaplib.IMAP4.error("Не удалось получить список папок почтового ящика")
+    fallback: str | None = None
+    for raw in rows or []:
+        value = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        match = re.match(r'^\((?P<attributes>[^)]*)\)\s+"[^"]*"\s+(?P<name>.+)$', value)
+        if not match:
+            continue
+        name = match.group("name").strip()
+        if len(name) >= 2 and name[0] == name[-1] == '"':
+            name = name[1:-1].replace(r'\"', '"').replace(r"\\", "\\")
+        attributes = match.group("attributes").casefold()
+        if r"\sent" in attributes:
+            return name
+        if name.casefold() in {"sent", "sent items", "sent messages", "отправленные"}:
+            fallback = name
+    if fallback:
+        return fallback
+    raise imaplib.IMAP4.error("Папка «Отправленные» не найдена")
+
+
+def save_sent_copy(account: MailAccount, message: EmailMessage, sent_at: datetime) -> None:
+    """Append the exact accepted message to the mailbox without risking a resend."""
+    client = imap_connection(account)
+    try:
+        client.login(account.imap_login, decrypt_secret(account.imap_password_encrypted))
+        folder = _sent_folder(client)
+        status, response = client.append(
+            folder, r"(\Seen)", imaplib.Time2Internaldate(sent_at), message.as_bytes(),
+        )
+        if status != "OK":
+            raise imaplib.IMAP4.error(f"Не удалось сохранить письмо в «Отправленные»: {response}")
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
 
 
 def build_email_message(delivery: EmailDelivery, account: MailAccount) -> EmailMessage:
@@ -374,6 +417,12 @@ def send_claimed_delivery(session: Session, delivery_id: str, worker_id: str) ->
             if refused: raise smtplib.SMTPRecipientsRefused(refused)
             delivery.status, delivery.sent_at, delivery.provider_message_id, delivery.error = "sent", now_utc(), delivery.message_id, None
             record_email_event(session, delivery, "sent")
+            try:
+                save_sent_copy(account, message, delivery.sent_at)
+            except Exception:
+                # SMTP has already accepted the message. A failed IMAP append must
+                # never trigger a retry and send a duplicate to the recipient.
+                logger.exception("Could not save sent copy for delivery %s", delivery.id)
             company = session.get(Company, delivery.company_id)
             if company:
                 company.communication_started_at = company.communication_started_at or delivery.sent_at
