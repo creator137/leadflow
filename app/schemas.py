@@ -82,7 +82,7 @@ class DirectionCreate(BaseModel):
     sheet_tab: str = Field(min_length=1, max_length=100)
     active: bool = True
     limit_new: int = Field(default=50, ge=1, le=10_000)
-    schedule: str | None = "0 5 * * *"
+    schedule: str | None = "0 7 * * *"
     email_enrichment_enabled: bool = False
     ai_enrichment_enabled: bool = False
     queries: list[DirectionQueryInput] = Field(min_length=1)

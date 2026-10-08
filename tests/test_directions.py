@@ -56,7 +56,7 @@ def test_new_direction_defaults_to_fifty_companies_daily() -> None:
         sources=["yandex_maps"],
     )
     assert data.limit_new == 50
-    assert data.schedule == "0 5 * * *"
+    assert data.schedule == "0 7 * * *"
 
 
 def test_active_direction_cannot_accidentally_lose_daily_schedule() -> None:
@@ -69,11 +69,11 @@ def test_active_direction_cannot_accidentally_lose_daily_schedule() -> None:
             locations=[DirectionLocationInput(city="Москва")], sources=["two_gis"],
         )
         direction = create_direction(session, data)
-        assert direction.schedule == "0 5 * * *"
+        assert direction.schedule == "0 7 * * *"
         direction.schedule = None
         session.commit()
         update_direction(session, direction, DirectionUpdate(active=True))
-        assert direction.schedule == "0 5 * * *"
+        assert direction.schedule == "0 7 * * *"
 
 
 def test_region_location_requires_supported_catalog_region() -> None:

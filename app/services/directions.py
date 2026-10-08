@@ -10,7 +10,7 @@ from app.models import Direction, DirectionLocation, DirectionSearchQuery, Direc
 from app.schemas import DirectionCreate, DirectionRead, DirectionUpdate
 from app.services.region_catalog import cities_for_region
 
-DEFAULT_DIRECTION_SCHEDULE = "0 5 * * *"
+DEFAULT_DIRECTION_SCHEDULE = "0 7 * * *"
 
 
 def slugify(value: str) -> str:
