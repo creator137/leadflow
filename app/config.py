@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://leadflow:leadflow@localhost:5432/leadflow"
     app_environment: str = "development"
     public_base_url: str = "http://localhost:8000"
+    display_timezone: str = "Europe/Moscow"
     email_open_tracking_enabled: bool = False
     email_click_tracking_enabled: bool = False
     secret_key: str = "development-only-change-me"

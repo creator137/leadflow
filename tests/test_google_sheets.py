@@ -257,7 +257,7 @@ def test_all_email_tracking_states_and_metadata_update_same_row() -> None:
             header, row = worksheet.rows[0], worksheet.rows[1]
             assert row[header.index("Статус почтовых отправлений")] == russian
             assert "Состояние взаимодействия" not in header
-            assert row[header.index("Дата отправки")] == "15.09.2026 13:30"
+            assert row[header.index("Дата отправки")] == "15.09.2026 11:30"
             assert "Шаблон письма" not in header and "Отправитель" not in header
             assert row[8] == "Ручной ЛПР"
 

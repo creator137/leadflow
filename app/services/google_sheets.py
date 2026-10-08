@@ -193,7 +193,8 @@ def _human_datetime(value: datetime | None) -> str:
         return ""
     # Legacy/SQLite rows can be naïve, but all LeadFlow timestamps are stored
     # as UTC; make that explicit before showing the administrator local time.
-    local = value.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Asia/Yekaterinburg")) if value.tzinfo is None else value.astimezone(ZoneInfo("Asia/Yekaterinburg"))
+    display_timezone = ZoneInfo(get_settings().display_timezone)
+    local = value.replace(tzinfo=timezone.utc).astimezone(display_timezone) if value.tzinfo is None else value.astimezone(display_timezone)
     return local.strftime("%d.%m.%Y %H:%M")
 
 
