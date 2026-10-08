@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -8,6 +10,9 @@ from app.models import Company, CompanyDirection, Direction, DirectionRun
 from app.services.company_enrichment import CompanyEnrichmentService
 from app.services.direction_collection import execute_direction
 from app.services.google_sheets import GoogleSheetsSyncService, active_sheets_config
+
+
+logger = logging.getLogger(__name__)
 
 
 def execute_direction_pipeline(
@@ -23,7 +28,13 @@ def execute_direction_pipeline(
         ))
         service = CompanyEnrichmentService(session, settings)
         for company in companies:
-            service.enrich(company, use_ai=direction.ai_enrichment_enabled)
+            try:
+                service.enrich(company, use_ai=direction.ai_enrichment_enabled)
+            except Exception:
+                # One malformed or unavailable website must not prevent every
+                # other newly collected company from being enriched.
+                session.rollback()
+                logger.exception("Company enrichment failed for %s", company.id)
     config = active_sheets_config(session, settings)
     if config:
         GoogleSheetsSyncService(session, config).sync_direction(direction)

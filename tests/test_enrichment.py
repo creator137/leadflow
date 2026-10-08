@@ -1,6 +1,6 @@
 from app.services.company_enrichment import (
     AIEnrichmentResult, AI_INSTRUCTIONS, Evidence, WebsitePage, WebsiteSnapshot,
-    _deterministic, _validated_ai_values,
+    _clean_html, _deterministic, _validated_ai_values,
 )
 
 
@@ -68,3 +68,8 @@ def test_compact_context_keeps_each_relevant_page_within_limit() -> None:
     blocks = snapshot.compact_blocks(3000)
     assert [block["url"] for block in blocks] == [page.url for page in snapshot.pages]
     assert sum(len(block["text"]) for block in blocks) == 3000
+
+
+def test_clean_html_handles_nested_boilerplate_nodes() -> None:
+    text, _ = _clean_html("<main>Контакты<div>cookie<span>cookie</span></div></main>")
+    assert text == "Контакты"

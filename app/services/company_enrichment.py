@@ -123,7 +123,9 @@ def _clean_html(html: str) -> tuple[str, BeautifulSoup]:
     for tag in soup.select("script:not([type='application/ld+json']),style,noscript,svg,nav,footer,iframe,form"):
         tag.decompose()
     for node in list(soup.find_all(string=BOILERPLATE_RE)):
-        parent = node.parent
+        # A previous match may have decomposed an ancestor and detached this
+        # NavigableString. Detached nodes no longer expose ``parent``.
+        parent = getattr(node, "parent", None)
         if parent and parent.name in {"div", "section", "aside"}:
             parent.decompose()
     return re.sub(r"\s+", " ", soup.get_text(" ", strip=True)), soup
