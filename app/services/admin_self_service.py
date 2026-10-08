@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import html
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -17,14 +15,8 @@ from app.models import (
 from app.services.recipients import resolve_recipient_email
 from app.schemas import DirectionWizardCreate
 from app.services.directions import create_direction, serialize_direction
-from app.services.proposals import ensure_direction_email_template, ensure_proposal_template, get_sender_settings
-
-
-def _plain_html(text: str) -> str:
-    value = html.escape(text).replace("\n", "<br>")
-    value = re.sub(r"\{\{\s*(\w+)\s*\}\}", r"{{ \1 }}", value)
-    return f'<div style="font-family:Arial,sans-serif;font-size:16px;line-height:1.55">{value}</div>'
-
+from app.services.campaign_templates import sync_direction_campaign_template
+from app.services.proposals import ensure_proposal_template, get_sender_settings
 
 def create_direction_bundle(session: Session, payload: DirectionWizardCreate) -> dict[str, Any]:
     mailbox = session.get(MailAccount, payload.mailbox_id)
@@ -40,12 +32,9 @@ def create_direction_bundle(session: Session, payload: DirectionWizardCreate) ->
     proposal.signature = payload.proposal_signature_override
     proposal.ai_instruction = payload.proposal_ai_instruction
     proposal.ai_personalization_enabled = payload.proposal_ai_enabled
-    ordinary = ensure_direction_email_template(session, direction)
-    ordinary.name = f"Автоматическое письмо — {direction.name}"
-    ordinary.subject_template = payload.email_template_subject
-    ordinary.text_template = payload.email_template_text
-    ordinary.html_template = _plain_html(payload.email_template_text)
-    ordinary.active = True
+    ordinary = sync_direction_campaign_template(session, direction)
+    if not ordinary:
+        raise ValueError("Для направления не создан шаблон КП.")
     campaign = Campaign(
         name=payload.campaign_name, direction_id=direction.id, mailbox_id=mailbox.id,
         template_id=ordinary.id, schedule=payload.campaign_schedule,

@@ -33,6 +33,7 @@ from app.services.collection import execute_job
 from app.services.analytics import analytics as build_analytics
 from app.services.ai_usage import ai_usage_details, ai_usage_journal
 from app.services.company_enrichment import CompanyEnrichmentService
+from app.services.campaign_templates import sync_direction_campaign_template
 from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.data_quality import backfill_structured_business_fields
 from app.services.directions import archive_direction, create_direction, serialize_direction, update_direction
@@ -736,9 +737,12 @@ def update_proposal_template(
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(template, key, value)
     template.version += 1
+    direction = session.get(Direction, template.direction_id)
+    if direction:
+        sync_direction_campaign_template(session, direction)
     session.commit()
     session.refresh(template)
-    return serialize_proposal_template(template, session.get(Direction, template.direction_id))
+    return serialize_proposal_template(template, direction)
 
 
 @app.post("/api/companies/{company_id}/proposal-drafts", status_code=201)
@@ -857,12 +861,18 @@ def campaigns(session: Session = Depends(get_db)) -> list[dict[str, object]]:
 
 @app.post("/api/campaigns", status_code=201)
 def create_campaign(payload: CampaignCreate, session: Session = Depends(get_db)) -> dict[str, object]:
-    if not session.get(MailAccount, payload.mailbox_id) or not session.get(EmailTemplate, payload.template_id):
-        raise HTTPException(400, "Выберите направление, шаблон и почтовый ящик.")
-    template = session.get(EmailTemplate, payload.template_id)
-    if payload.direction_id and template.direction_id != payload.direction_id:
-        raise HTTPException(409, "Выбранный шаблон относится к другому направлению.")
-    campaign = Campaign(**payload.model_dump())
+    if not session.get(MailAccount, payload.mailbox_id):
+        raise HTTPException(400, "Выберите направление и почтовый ящик.")
+    values = payload.model_dump()
+    if payload.direction_id:
+        direction = session.get(Direction, payload.direction_id)
+        template = sync_direction_campaign_template(session, direction) if direction else None
+        if not template:
+            raise HTTPException(409, "Для направления не создан шаблон КП.")
+        values["template_id"] = template.id
+    elif not session.get(EmailTemplate, payload.template_id):
+        raise HTTPException(400, "Выберите шаблон и почтовый ящик.")
+    campaign = Campaign(**values)
     session.add(campaign)
     session.commit()
     session.refresh(campaign)
@@ -876,13 +886,19 @@ def update_campaign(campaign_id: str, payload: CampaignUpdate, session: Session 
         raise HTTPException(404, "Автоматическая рассылка не найдена.")
     values = payload.model_dump(exclude_unset=True)
     mailbox_id = values.get("mailbox_id", campaign.mailbox_id)
-    template_id = values.get("template_id", campaign.template_id)
-    if not session.get(MailAccount, mailbox_id) or not session.get(EmailTemplate, template_id):
-        raise HTTPException(400, "Выберите существующий шаблон и почтовый ящик.")
+    if not session.get(MailAccount, mailbox_id):
+        raise HTTPException(400, "Выберите существующий почтовый ящик.")
     direction_id = values.get("direction_id", campaign.direction_id)
-    template = session.get(EmailTemplate, template_id)
-    if direction_id and template.direction_id != direction_id:
-        raise HTTPException(409, "Выбранный шаблон относится к другому направлению.")
+    if direction_id:
+        direction = session.get(Direction, direction_id)
+        template = sync_direction_campaign_template(session, direction) if direction else None
+        if not template:
+            raise HTTPException(409, "Для направления не создан шаблон КП.")
+        values["template_id"] = template.id
+    else:
+        template_id = values.get("template_id", campaign.template_id)
+        if not session.get(EmailTemplate, template_id):
+            raise HTTPException(400, "Выберите существующий шаблон.")
     for key, value in values.items():
         setattr(campaign, key, value)
     session.commit()

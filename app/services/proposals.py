@@ -17,6 +17,7 @@ from app.models import (
     GoogleSheetsConfig, MailAccount, SenderSettings, SheetPersonalizationDraft, WebsiteAnalysis,
 )
 from app.services.company_enrichment import WebsiteAnalysisService
+from app.services.campaign_templates import sync_direction_campaign_template
 from app.services.deepseek import DeepSeekClient, DeepSeekError, ai_settings
 from app.services.mailing import build_delivery
 from app.services.recipients import resolve_recipient_email, valid_email
@@ -174,8 +175,7 @@ def ensure_all_proposal_templates(session: Session) -> None:
         if not session.scalar(select(DirectionProposalTemplate.id).where(DirectionProposalTemplate.direction_id == direction.id)):
             ensure_proposal_template(session, direction)
             changed = True
-        if not direction.automatic_template_id:
-            ensure_direction_email_template(session, direction)
+        if sync_direction_campaign_template(session, direction):
             changed = True
     if not session.get(SenderSettings, "default"):
         get_sender_settings(session)

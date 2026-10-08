@@ -70,7 +70,11 @@ def test_wizard_creates_search_proposal_non_ai_template_and_campaign_without_dup
         campaign = session.get(Campaign, result["campaign_id"])
         assert direction.automatic_template_id == ordinary.id
         assert proposal.direction_id == direction.id and proposal.ai_instruction.startswith("Учитывай")
-        assert ordinary.direction_id == direction.id and "{{company_name}}" in ordinary.text_template
+        assert ordinary.direction_id == direction.id
+        assert ordinary.subject_template == proposal.subject
+        assert ordinary.text_template == "\n\n".join(filter(None, (
+            proposal.greeting, proposal.main_body, proposal.cta, proposal.signature,
+        )))
         assert campaign.template_id == ordinary.id and campaign.mailbox_id == mailbox.id
         assert campaign.active is False and campaign.status == "paused"
         assert len(result["direction"]["queries"]) == 2 and len(result["direction"]["sources"]) == 2
@@ -103,10 +107,18 @@ def test_campaign_crud_pause_resume_and_non_ai_queue(monkeypatch) -> None:
         assert resume_campaign(created["id"], session).active is True
         assert pause_campaign(created["id"], session).active is False
         monkeypatch.setattr("app.services.deepseek.DeepSeekClient.generate", lambda *a, **k: (_ for _ in ()).throw(AssertionError("DeepSeek must not run")))
+        proposal = session.scalar(select(DirectionProposalTemplate).where(
+            DirectionProposalTemplate.direction_id == direction.id,
+        ))
+        proposal.subject = "Новая тема КП"
+        proposal.main_body = "Новый текст из шаблона КП"
+        proposal.signature = "С уважением,\nИрина"
         campaign = session.get(Campaign, created["id"]); campaign.active = True; campaign.status = "running"; session.commit()
         assert queue_campaign(session, campaign, Settings(public_base_url="https://lead.test"))["queued"] == 1
         delivery = session.scalar(select(EmailDelivery).where(EmailDelivery.campaign_id == campaign.id))
-        assert delivery.send_mode == "campaign" and "Тестовая компания" in delivery.subject
+        assert delivery.send_mode == "campaign" and delivery.subject == "Новая тема КП"
+        assert "Новый текст из шаблона КП" in delivery.text_body
+        assert "С уважением,\nИрина" in delivery.text_body
     finally:
         session.close()
 

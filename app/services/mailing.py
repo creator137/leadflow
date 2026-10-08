@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings, is_branded_https_url, is_public_https_url
 from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailTemplate, MailAccount, SenderSettings, Suppression, TrackedLink
+from app.services.campaign_templates import sync_direction_campaign_template
 from app.services.secrets import decrypt_secret
 from app.services.email_events import record_email_event, sync_email_event_to_sheets
 from app.services.attachments import active_attachments, attachment_path
@@ -314,12 +315,17 @@ def build_delivery(session: Session, company: Company, account: MailAccount, tem
 
 def queue_campaign(session: Session, campaign: Campaign, settings: Settings) -> dict[str, int]:
     account, template = session.get(MailAccount, campaign.mailbox_id), session.get(EmailTemplate, campaign.template_id)
-    if campaign.direction_id and (not template or template.direction_id != campaign.direction_id):
+    if campaign.direction_id:
         direction = session.get(Direction, campaign.direction_id)
-        template = session.get(EmailTemplate, direction.automatic_template_id) if direction and direction.automatic_template_id else None
-        template = template or session.scalar(select(EmailTemplate).where(
-            EmailTemplate.direction_id == campaign.direction_id, EmailTemplate.active.is_(True),
-        ).order_by(EmailTemplate.created_at).limit(1))
+        canonical = sync_direction_campaign_template(session, direction) if direction else None
+        if canonical:
+            template = canonical
+            campaign.template_id = canonical.id
+        elif not template or template.direction_id != campaign.direction_id:
+            template = session.get(EmailTemplate, direction.automatic_template_id) if direction and direction.automatic_template_id else None
+            template = template or session.scalar(select(EmailTemplate).where(
+                EmailTemplate.direction_id == campaign.direction_id, EmailTemplate.active.is_(True),
+            ).order_by(EmailTemplate.created_at).limit(1))
     if not account or not account.active or not template or not template.active: raise ValueError("Campaign mailbox or template is inactive")
     today = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
     mailbox_used = session.scalar(select(func.count()).select_from(EmailDelivery).where(
