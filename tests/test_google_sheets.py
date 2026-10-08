@@ -8,6 +8,7 @@ from app.db import Base
 from app.models import Company, CompanyDirection, CompanyFieldProvenance, Direction, EmailDelivery, EmailTemplate, GoogleSheetsConfig, MailAccount, SheetRowMapping
 from app.services.google_sheets import (
     BUSINESS_COLUMNS, COLUMNS, HEADERS, SHARED_SHEET_HEADERS, GoogleSheetsSyncService, _retry,
+    _style_email_statuses,
     discover_schema, hide_technical_columns, standardize_business_columns, sync_companies, sync_delivery_tracking_to_sheet,
 )
 from app.services.provenance import apply_field
@@ -329,6 +330,60 @@ def test_google_auth_transport_error_is_retried(monkeypatch) -> None:
         return "ok"
     monkeypatch.setattr("app.services.google_sheets.time.sleep", lambda _: None)
     assert _retry(operation) == "ok" and attempts == 2
+
+
+def test_google_quota_error_waits_for_quota_window(monkeypatch) -> None:
+    import requests
+    from gspread.exceptions import APIError
+
+    attempts = 0
+    sleeps = []
+
+    def operation():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            response = requests.Response()
+            response.status_code = 429
+            response.headers["Retry-After"] = "23"
+            response._content = b'{"error":{"code":429,"message":"quota"}}'
+            raise APIError(response)
+        return "ok"
+
+    monkeypatch.setattr("app.services.google_sheets.random.random", lambda: 0)
+    monkeypatch.setattr("app.services.google_sheets.time.sleep", sleeps.append)
+
+    assert _retry(operation) == "ok"
+    assert attempts == 2 and sleeps == [23]
+
+
+def test_email_status_formatting_is_sent_as_one_batched_write() -> None:
+    class FormattingWorksheet:
+        id = 7
+        format = object()
+
+        def __init__(self):
+            self.spreadsheet = self
+            self.calls = []
+
+        def batch_update(self, body):
+            self.calls.append(body)
+
+    worksheet = FormattingWorksheet()
+    styles = [(row, 12, "Получен ответ") for row in range(2, 2002)]
+
+    _style_email_statuses(worksheet, styles)
+
+    assert len(worksheet.calls) == 1
+    requests_body = worksheet.calls[0]["requests"]
+    assert len(requests_body) == 1
+    assert requests_body[0]["repeatCell"]["range"] == {
+        "sheetId": 7,
+        "startRowIndex": 1,
+        "endRowIndex": 2001,
+        "startColumnIndex": 11,
+        "endColumnIndex": 12,
+    }
 
 
 def test_existing_sheet_gets_website_column_and_preserves_manual_value() -> None:

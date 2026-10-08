@@ -73,7 +73,7 @@ def _column_letter(index: int) -> str:
     return gspread.utils.rowcol_to_a1(1, index).rstrip("1")
 
 
-def _retry(operation: Callable[[], T], attempts: int = 4) -> T:
+def _retry(operation: Callable[[], T], attempts: int = 5) -> T:
     for attempt in range(attempts):
         try:
             return operation()
@@ -82,7 +82,19 @@ def _retry(operation: Callable[[], T], attempts: int = 4) -> T:
             transient = isinstance(exc, (requests.RequestException, TransportError)) or status in {429, 500, 502, 503, 504}
             if not transient or attempt == attempts - 1:
                 raise
-            time.sleep((2 ** attempt) + random.random())
+            # A per-minute Sheets quota cannot recover during the old 1/2/4
+            # second backoff. Give quota windows time to roll over, while
+            # keeping shorter retries for network and server failures.
+            if status == 429:
+                headers = getattr(getattr(exc, "response", None), "headers", {}) or {}
+                try:
+                    retry_after = float(headers.get("Retry-After", 0))
+                except (TypeError, ValueError):
+                    retry_after = 0
+                delay = max(retry_after, min(15 * (2 ** attempt), 60))
+            else:
+                delay = 2 ** attempt
+            time.sleep(delay + random.random())
     raise RuntimeError("unreachable")
 
 
@@ -185,25 +197,45 @@ def _human_datetime(value: datetime | None) -> str:
     return local.strftime("%d.%m.%Y %H:%M")
 
 
-def _style_email_status(worksheet: Any, row_number: int, column: int | None, status: str) -> None:
-    """The mail-status cell is system-owned, so response highlighting is safe."""
-    if not column or not hasattr(worksheet, "format") or not hasattr(worksheet, "spreadsheet"):
+def _style_email_statuses(
+    worksheet: Any, styles: list[tuple[int, int | None, str]],
+) -> None:
+    """Apply all response highlights with one Google Sheets write request."""
+    if not styles or not hasattr(worksheet, "format") or not hasattr(worksheet, "spreadsheet"):
+        return
+    requests_body: list[dict[str, Any]] = []
+    # Adjacent rows with the same visual state can share one repeatCell
+    # request. A normal sheet therefore needs only one or a few operations in
+    # one API call instead of one API call per company.
+    grouped: list[tuple[int, int, int, bool]] = []
+    for row_number, column, status in sorted(styles, key=lambda item: (item[1] or 0, item[0])):
+        if not column:
+            continue
+        highlighted = status == "Получен ответ"
+        if grouped and grouped[-1][2] == column and grouped[-1][3] == highlighted and grouped[-1][1] + 1 == row_number:
+            start, _, grouped_column, grouped_highlighted = grouped[-1]
+            grouped[-1] = (start, row_number, grouped_column, grouped_highlighted)
+        else:
+            grouped.append((row_number, row_number, column, highlighted))
+    for start_row, end_row, column, highlighted in grouped:
+        requests_body.append({"repeatCell": {
+            "range": {"sheetId": worksheet.id, "startRowIndex": start_row - 1, "endRowIndex": end_row,
+                      "startColumnIndex": column - 1, "endColumnIndex": column},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": {"red": 0.72, "green": 0.9, "blue": 0.72} if highlighted else {"red": 1, "green": 1, "blue": 1},
+                "textFormat": {"bold": highlighted},
+            }},
+            "fields": "userEnteredFormat(backgroundColor,textFormat.bold)",
+        }})
+    if not requests_body:
         return
     try:
         # Decorative formatting must never hold up business data sync during a
         # temporary Google API/DNS failure. The status value has already been
         # written through the retrying business path above.
-        worksheet.spreadsheet.batch_update({"requests": [{"repeatCell": {
-            "range": {"sheetId": worksheet.id, "startRowIndex": row_number - 1, "endRowIndex": row_number,
-                      "startColumnIndex": column - 1, "endColumnIndex": column},
-            "cell": {"userEnteredFormat": {
-                "backgroundColor": {"red": 0.72, "green": 0.9, "blue": 0.72} if status == "Получен ответ" else {"red": 1, "green": 1, "blue": 1},
-                "textFormat": {"bold": status == "Получен ответ"},
-            }},
-            "fields": "userEnteredFormat(backgroundColor,textFormat.bold)",
-        }}]})
+        _retry(lambda: worksheet.spreadsheet.batch_update({"requests": requests_body}))
     except (gspread.exceptions.APIError, requests.RequestException, TransportError):
-        logger.warning("Could not format email status cell %s%s", _column_letter(column), row_number)
+        logger.warning("Could not format %s email status cells", len(styles))
 
 
 def _text(value: Any) -> str:
@@ -561,6 +593,7 @@ class GoogleSheetsSyncService:
         occupied = set(row_by_id.values())
         next_row = schema.data_row
         updates: list[dict[str, Any]] = []
+        email_status_styles: list[tuple[int, int | None, str]] = []
         inserted = updated = 0
         for company in companies:
             row_number = row_by_id.get(company.id)
@@ -604,13 +637,15 @@ class GoogleSheetsSyncService:
                 current = existing[column - 1].strip() if len(existing) >= column else ""
                 if tracking[key] != current:
                     updates.append({"range": f"{_column_letter(column)}{row_number}", "values": [[tracking[key]]]})
-            _style_email_status(worksheet, row_number, schema.email_status_column, tracking["status"])
+                if key == "status" and (tracking[key] == "Получен ответ" or current == "Получен ответ"):
+                    email_status_styles.append((row_number, column, tracking[key]))
             if mapping is None:
                 mapping = SheetRowMapping(company_id=company.id, direction_id=direction.id, spreadsheet_id=self.config.spreadsheet_id, sheet_tab=direction.sheet_tab, sheet_row=row_number, last_synced_values=synced_values)
                 self.session.add(mapping)
             else:
                 mapping.sheet_tab, mapping.sheet_row, mapping.last_synced_at, mapping.last_synced_values = direction.sheet_tab, row_number, datetime.now(timezone.utc), synced_values
         if updates: _retry(lambda: worksheet.batch_update(updates))
+        _style_email_statuses(worksheet, email_status_styles)
         self.session.add(GoogleSyncRun(
             config_id=self.config.id, direction_id=direction.id, status="completed",
             rows_inserted=inserted, rows_updated=updated, manual_changes=imported,
@@ -665,7 +700,7 @@ def sync_delivery_tracking_to_sheet(
             updates.append({"range": f"{_column_letter(column)}{row_number}", "values": [[values[key]]]})
     if updates:
         _retry(lambda: worksheet.batch_update(updates))
-    _style_email_status(worksheet, row_number, schema.email_status_column, values["status"])
+    _style_email_statuses(worksheet, [(row_number, schema.email_status_column, values["status"])])
     mapping.sheet_row = row_number
     mapping.last_synced_at = datetime.now(timezone.utc)
     session.commit()
