@@ -3,10 +3,44 @@ const helpTopics = [
   ['companies','Компании'],['extra-search','Поиск по фразам и товаров'],['sheets','Google Таблица'],
   ['proposal','Персональное КП'],['templates','Шаблоны и отправитель'],['mailing','Обычные письма и рассылки'],
   ['mailboxes','Почта, ответы и статусы'],['analytics','Аналитика и настройки'],
-  ['attachments','Вложения'],['errors','Если что-то не работает']
+  ['attachments','Вложения'],['access','Доступы'],['errors','Если что-то не работает']
 ];
 
 function helpSectionLink(section,label){return `<button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="showSection('${section}')">Открыть раздел «${label}»</button>`}
+
+function serviceAccessCard(item){
+  const slug=esc(item.slug);
+  return `<div class="service-access-card" data-service-access="${slug}">
+    <div class="d-flex flex-wrap justify-content-between gap-2 align-items-start mb-3">
+      <div><div class="eyebrow">${esc(item.purpose)}</div><h3 class="h5 mt-1 mb-0">${esc(item.name)}</h3></div>
+      <a class="btn btn-sm btn-outline-primary" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">Открыть сервис</a>
+    </div>
+    <p class="small text-secondary">${esc(item.note||'')}</p>
+    <div class="mb-3"><label class="form-label" for="access-login-${slug}">Логин</label><div class="input-group"><input class="form-control" id="access-login-${slug}" value="${esc(item.login)}" autocomplete="off" spellcheck="false" placeholder="Пока не заполнен"><button class="btn btn-outline-secondary" type="button" onclick="copyServiceAccess('${slug}','login')">Копировать</button></div></div>
+    <div class="mb-3"><label class="form-label" for="access-password-${slug}">Пароль</label><div class="input-group"><input class="form-control" id="access-password-${slug}" type="password" value="${esc(item.password)}" autocomplete="new-password" spellcheck="false" placeholder="Пока не заполнен"><button class="btn btn-outline-secondary" type="button" onclick="toggleServicePassword('${slug}',this)">Показать</button><button class="btn btn-outline-secondary" type="button" onclick="copyServiceAccess('${slug}','password')">Копировать</button></div></div>
+    <button class="btn btn-primary" type="button" onclick="saveServiceAccess('${slug}',this)">Сохранить доступ</button>
+  </div>`;
+}
+
+async function loadServiceAccess(){
+  const root=$('serviceAccessCards');if(!root)return;
+  try{const rows=await api('/api/service-access');root.innerHTML=rows.map(serviceAccessCard).join('')}
+  catch(e){root.innerHTML=`<div class="alert alert-danger mb-0">${esc(e.message)}</div>`}
+}
+
+function toggleServicePassword(slug,button){const input=$(`access-password-${slug}`);const show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'Скрыть':'Показать'}
+
+async function copyServiceAccess(slug,field){
+  const input=$(`access-${field}-${slug}`);if(!input?.value){notify('Поле пока не заполнено.',true);return}
+  try{await navigator.clipboard.writeText(input.value);notify(field==='login'?'Логин скопирован.':'Пароль скопирован.')}
+  catch(_){input.select();document.execCommand('copy');notify(field==='login'?'Логин скопирован.':'Пароль скопирован.')}
+}
+
+async function saveServiceAccess(slug,button){
+  busy(button,true,'Сохраняем…');
+  try{await api(`/api/service-access/${slug}`,{method:'PATCH',body:JSON.stringify({login:$(`access-login-${slug}`).value,password:$(`access-password-${slug}`).value})});notify('Доступ сохранён в зашифрованном виде.');await loadServiceAccess()}
+  catch(e){notify(e.message,true)}finally{busy(button,false)}
+}
 
 function renderHelp(){
   const root=$('helpContent');
@@ -165,6 +199,13 @@ function renderHelp(){
           <div class="help-warning help-note">Список фиксируется при создании черновика. Добавление или удаление файла у направления не меняет старый черновик и уже отправленные письма. Чтобы новый файл попал в КП, создайте новый черновик.</div>
         </article>
 
+        <article class="help-topic" id="help-access">
+          <h2>Доступы</h2>
+          <p>Ссылки на оплату и управление внешними службами LeadFlow. Логины и пароли доступны только после входа в админку и хранятся в системе в зашифрованном виде.</p>
+          <div class="help-warning help-note"><strong>Важно.</strong> Не отправляйте эти данные в мессенджерах и не показывайте посторонним. После изменения логина или пароля заполните поле и нажмите <strong>«Сохранить доступ»</strong>.</div>
+          <div class="service-access-grid" id="serviceAccessCards"><div class="text-secondary">Загружаем доступы…</div></div>
+        </article>
+
         <article class="help-topic help-faq" id="help-errors">
           <h2>Типовые ошибки и что делать</h2>
           <details open><summary>«У компании не указан email для отправки»</summary><p class="mt-2">Заполните корректную почту ЛПР или общую почту компании в Google Таблице, нажмите <strong>«Синхронизировать сейчас»</strong> и повторите действие. В черновике КП адрес также можно исправить в <strong>«Кому отправить»</strong>.</p></details>
@@ -187,6 +228,7 @@ function renderHelp(){
     root.querySelectorAll('.help-topic').forEach(topic=>{const show=!query||topic.textContent.toLocaleLowerCase('ru-RU').includes(query);topic.hidden=!show;if(show)visible++});
     $('helpEmpty').classList.toggle('help-empty',visible>0);
   });
+  loadServiceAccess();
 }
 
 document.addEventListener('DOMContentLoaded',renderHelp);

@@ -20,6 +20,10 @@
 .help-fields dd{font-weight:400}
 .help-empty{display:none}
 .help-topic[hidden]{display:none!important}
+.service-access-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.service-access-card{border:1px solid var(--line);border-radius:.85rem;background:#fbfcfc;padding:18px;min-width:0}
+.service-access-card .input-group{flex-wrap:nowrap}
+.service-access-card .form-control{min-width:0}
 .help-faq details{border-top:1px solid var(--line);padding:.8rem 0}
 .help-faq summary{cursor:pointer;font-weight:650}
 @media(max-width:991.98px){.help-layout{grid-template-columns:1fr}.help-nav{position:static;display:flex;gap:6px;overflow-x:auto}.help-nav button{width:auto;min-width:max-content}.help-topic{padding:20px}}

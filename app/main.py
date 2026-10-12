@@ -18,7 +18,7 @@ from app.db import SessionLocal, get_db
 from app.models import (
     AIConfig, Campaign, Company, CompanyDirection, CompanyFieldProvenance, CompanySourceRecord,
     Direction, DirectionAttachment, DirectionProposalTemplate, DirectionRun, EmailDelivery, EmailTemplate, GoogleSheetsConfig, GoogleSyncRun,
-    MailAccount, ParserRun, PhraseSearchResult, PhraseSearchRun, ProductSearchResult, ProductSearchRun, ProductSearchSheetConfig, SheetPersonalizationDraft, SheetRowMapping, SourceJob, Suppression, TrackedLink,
+    MailAccount, ParserRun, PhraseSearchResult, PhraseSearchRun, ProductSearchResult, ProductSearchRun, ProductSearchSheetConfig, ServiceAccessCredential, SheetPersonalizationDraft, SheetRowMapping, SourceJob, Suppression, TrackedLink,
 )
 from app.schemas import (
     AIConfigCreate, AIConfigRead, CampaignCreate, CampaignRead, CampaignUpdate, CompanyRead, CompanyUpdate,
@@ -26,7 +26,7 @@ from app.schemas import (
     EmailTemplateRead, EmailTemplateUpdate, GoogleSheetsConfigCreate, GoogleSheetsConfigRead, MailAccountCreate,
     MailAccountRead, MailAccountUpdate, ManualSendCreate, ParserRunRead, SuppressionCreate, TemplatePreview, TemplateTestSend,
     AISettingsUpdate, PersonalizationPreviewCreate, PersonalizedSendCreate, PhraseSearchCreate, PhraseSearchRead, ProductSearchCreate, ProductSearchRunRead, ProductSearchSheetConfigRead, ProductSearchSheetConfigUpdate, ProductSearchSelectionUpdate, ProductSearchSendCreate,
-    ProposalDraftCreate, ProposalDraftUpdate, ProposalTemplateUpdate, ProposalTestSend, SenderSettingsUpdate,
+    ProposalDraftCreate, ProposalDraftUpdate, ProposalTemplateUpdate, ProposalTestSend, SenderSettingsUpdate, ServiceAccessRead, ServiceAccessUpdate,
     SheetActionRequest, SourceJobCreate, SourceJobRead, SourceJobUpdate,
 )
 from app.services.collection import execute_job
@@ -60,6 +60,7 @@ from app.services.user_errors import human_error
 from app.services.email_events import record_email_event, sync_email_event_to_sheets
 from app.sources.phrase_search import execute_phrase_search
 from app.services.product_search import execute_product_search, product_sheet_config, read_product_sheet_selection, send_selected_supplier_requests, serialize_product_result, sync_product_results
+from app.services.service_access import ensure_service_access, serialize_service_access, update_service_access
 
 app = FastAPI(title="LeadFlow", version="0.1.0")
 STATIC_DIR = Path(__file__).parent / "static"
@@ -72,6 +73,7 @@ def security_startup_check() -> None:
     with SessionLocal() as session:
         backfill_structured_business_fields(session)
         ensure_all_proposal_templates(session)
+        ensure_service_access(session)
 
 
 @app.middleware("http")
@@ -135,6 +137,36 @@ def system_settings() -> dict[str, str | bool | int]:
         "google_sheets_spreadsheet_id": settings.google_sheets_spreadsheet_id,
         "google_service_account_configured": bool(settings.google_service_account_json),
     }
+
+
+@app.get("/api/service-access", response_model=list[ServiceAccessRead])
+def service_access_list(response: Response, session: Session = Depends(get_db)) -> list[dict[str, object]]:
+    settings = get_settings()
+    if not settings.admin_username or not settings.admin_password:
+        raise HTTPException(503, "Сначала включите защищённый вход в админку.")
+    response.headers["Cache-Control"] = "no-store"
+    return [serialize_service_access(row) for row in ensure_service_access(session)]
+
+
+@app.patch("/api/service-access/{slug}", response_model=ServiceAccessRead)
+def service_access_update(
+    slug: str, payload: ServiceAccessUpdate, response: Response, session: Session = Depends(get_db),
+) -> dict[str, object]:
+    settings = get_settings()
+    if not settings.admin_username or not settings.admin_password:
+        raise HTTPException(503, "Сначала включите защищённый вход в админку.")
+    ensure_service_access(session)
+    row = session.scalar(select(ServiceAccessCredential).where(ServiceAccessCredential.slug == slug))
+    if row is None:
+        raise HTTPException(404, "Сервис не найден.")
+    supplied = payload.model_dump(exclude_unset=True)
+    update_service_access(
+        session, row,
+        login=supplied.get("login"), password=supplied.get("password"),
+        update_login="login" in supplied, update_password="password" in supplied,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return serialize_service_access(row)
 
 
 @app.get("/api/companies", response_model=list[CompanyRead])

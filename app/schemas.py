@@ -58,6 +58,22 @@ class CompanyUpdate(BaseModel):
     manually_blocked: bool | None = None
 
 
+class ServiceAccessRead(BaseModel):
+    slug: str
+    name: str
+    purpose: str
+    url: str
+    login: str
+    password: str
+    note: str | None
+    updated_at: datetime
+
+
+class ServiceAccessUpdate(BaseModel):
+    login: str | None = Field(default=None, max_length=500)
+    password: str | None = Field(default=None, max_length=1000)
+
+
 class DirectionQueryInput(BaseModel):
     query: str = Field(min_length=1, max_length=255)
     active: bool = True
