@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import email
+import html
 import logging
 import re
 import smtplib
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import parseaddr
+from urllib.parse import quote
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -24,28 +26,109 @@ STATUS_RE = re.compile(r"(?:^|\s)([245])\.\d\.\d(?:\s|$)")
 FOLDER_RE = re.compile(r'^\((?P<attributes>[^)]*)\)\s+"[^"]*"\s+(?:"(?P<quoted>[^"]+)"|(?P<bare>\S+))\s*$')
 logger = logging.getLogger(__name__)
 
+COMPANY_CARD_FIELDS = (
+    ("Наименование клиента", "company_name"),
+    ("Область", "region"),
+    ("Город", "city"),
+    ("Кол-во филиалов", "branches_count"),
+    ("Адрес", "address"),
+    ("Почта компании", "company_email"),
+    ("Телефон компании", "company_phone"),
+    ("Сайт", "website"),
+    ("ИНН", "inn"),
+    ("ЛПР", "decision_maker_name"),
+    ("Должность ЛПР", "decision_maker_position"),
+    ("Почта ЛПР", "decision_maker_email"),
+    ("Телефон ЛПР", "decision_maker_phone"),
+    ("Действие", "action"),
+    ("Результат", "result"),
+)
 
-def _reply_context(session: Session, delivery: EmailDelivery, inbound: InboundReply) -> str:
+
+def _display_value(value: object) -> str:
+    if value is None or value == "":
+        return "—"
+    return str(value)
+
+
+def _sheet_row_url(mapping: SheetRowMapping | None) -> str | None:
+    if not mapping:
+        return None
+    cell = quote(f"'{mapping.sheet_tab}'!A{mapping.sheet_row}", safe="")
+    return f"https://docs.google.com/spreadsheets/d/{mapping.spreadsheet_id}/edit#range={cell}"
+
+
+def _reply_details(
+    session: Session, delivery: EmailDelivery, inbound: InboundReply,
+) -> tuple[Company | None, Direction | None, SheetRowMapping | None, list[tuple[str, str]], str | None]:
     company = session.get(Company, delivery.company_id)
     direction = session.get(Direction, delivery.direction_id) if delivery.direction_id else None
     mapping = session.scalar(select(SheetRowMapping).where(
         SheetRowMapping.company_id == delivery.company_id,
         SheetRowMapping.direction_id == delivery.direction_id,
     ).order_by(SheetRowMapping.last_synced_at.desc()).limit(1))
-    return "\n".join((
+    card = [(label, _display_value(getattr(company, field, None))) for label, field in COMPANY_CARD_FIELDS]
+    card.append(("Email, с которого получен ответ", inbound.sender))
+    return company, direction, mapping, card, _sheet_row_url(mapping)
+
+
+def _reply_context(session: Session, delivery: EmailDelivery, inbound: InboundReply) -> str:
+    company, direction, mapping, card, sheet_url = _reply_details(session, delivery, inbound)
+    lines = [
         "Получен ответ на КП LeadFlow.",
         f"Направление / вкладка: {(direction.name if direction else '—')} / {(mapping.sheet_tab if mapping else '—')}",
-        f"Компания: {(company.company_name if company else '—')}",
         f"Строка Google Sheets: {(mapping.sheet_row if mapping else '—')}",
+    ]
+    if sheet_url:
+        lines.append(f"Открыть строку: {sheet_url}")
+    lines.extend((
         f"LeadFlow ID: {delivery.company_id}",
-        f"Email клиента: {inbound.sender}",
         f"Тема исходного КП: {delivery.subject}",
+        "",
+        "Карточка клиента:",
+        *(f"{label}: {value}" for label, value in card),
         "",
         "Текст ответа клиента:",
         inbound.text_body or "(текстовая часть ответа отсутствует)",
         "",
         "Оригинальное письмо приложено файлом reply.eml.",
     ))
+    return "\n".join(lines)
+
+
+def _reply_context_html(session: Session, delivery: EmailDelivery, inbound: InboundReply) -> str:
+    company, direction, mapping, card, sheet_url = _reply_details(session, delivery, inbound)
+    rows = "".join(
+        f'<tr><td style="padding:7px 10px;color:#667085;border-bottom:1px solid #eaecf0;">{html.escape(label)}</td>'
+        f'<td style="padding:7px 10px;border-bottom:1px solid #eaecf0;"><strong>{html.escape(value)}</strong></td></tr>'
+        for label, value in card
+    )
+    sheet_link = (
+        f'<a href="{html.escape(sheet_url, quote=True)}" style="color:#175cd3;">Открыть строку в Google Таблице</a>'
+        if sheet_url else "Ссылка на строку отсутствует"
+    )
+    reply_text = html.escape(inbound.text_body or "(текстовая часть ответа отсутствует)").replace("\n", "<br>")
+    return f"""<!doctype html>
+<html><body style="margin:0;padding:24px;background:#f2f4f7;font-family:Arial,sans-serif;color:#101828;">
+<div style="max-width:760px;margin:0 auto;background:#fff;border:1px solid #eaecf0;border-radius:12px;overflow:hidden;">
+  <div style="padding:22px 24px;background:#f9fafb;border-bottom:1px solid #eaecf0;">
+    <div style="font-size:20px;font-weight:700;">Получен ответ на КП LeadFlow</div>
+    <div style="margin-top:8px;color:#475467;">{html.escape(direction.name if direction else 'Без направления')} · {html.escape(company.company_name if company else 'Компания')}</div>
+  </div>
+  <div style="padding:24px;">
+    <div style="padding:16px;background:#f9fafb;border-radius:8px;line-height:1.55;">{reply_text}</div>
+    <h2 style="margin:24px 0 10px;font-size:17px;">Карточка клиента</h2>
+    <table role="presentation" style="width:100%;border-collapse:collapse;font-size:14px;">{rows}</table>
+    <div style="margin-top:18px;color:#475467;line-height:1.6;">
+      Вкладка: <strong>{html.escape(mapping.sheet_tab if mapping else '—')}</strong><br>
+      Строка: <strong>{mapping.sheet_row if mapping else '—'}</strong><br>
+      {sheet_link}<br>
+      Тема исходного КП: <strong>{html.escape(delivery.subject)}</strong>
+    </div>
+    <p style="margin:20px 0 0;color:#667085;font-size:13px;">Оригинальное письмо приложено файлом reply.eml.</p>
+  </div>
+</div>
+</body></html>"""
 
 
 def _forward(session: Session, account: MailAccount, raw_message: bytes, manager_email: str, delivery: EmailDelivery, inbound: InboundReply) -> None:
@@ -53,6 +136,7 @@ def _forward(session: Session, account: MailAccount, raw_message: bytes, manager
     company = session.get(Company, delivery.company_id)
     message["Subject"], message["From"], message["To"] = f"LeadFlow: ответ — {(company.company_name if company else 'компания')}", account.from_email, manager_email
     message.set_content(_reply_context(session, delivery, inbound))
+    message.add_alternative(_reply_context_html(session, delivery, inbound), subtype="html")
     message.add_attachment(raw_message, maintype="message", subtype="rfc822", filename="reply.eml")
     with smtp_connection(account) as smtp:
         smtp.login(account.smtp_login, decrypt_secret(account.smtp_password_encrypted)); smtp.send_message(message)

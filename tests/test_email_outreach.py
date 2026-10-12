@@ -279,6 +279,15 @@ def test_poll_reads_inbox_and_junk_with_separate_checkpoints(db: Session, monkey
 
 def test_manager_forward_contains_sheet_and_company_identification(db: Session, monkeypatch) -> None:
     direction, company, account, template = setup(db)
+    company.region = "Московская область"
+    company.address = "Москва, Тестовая улица, 1"
+    company.company_phone = "+7 495 000-00-00"
+    company.website = "https://cafe.example.test"
+    company.inn = "7701234567"
+    company.decision_maker_name = "Анна Иванова"
+    company.decision_maker_position = "Управляющая"
+    company.decision_maker_email = "anna@example.test"
+    company.decision_maker_phone = "+7 916 000-00-00"
     account.forward_replies_to = "manager@example.test"
     config = GoogleSheetsConfig(spreadsheet_id="sheet", worksheet_name="test", credentials_encrypted="unused")
     db.add(config); db.flush()
@@ -288,8 +297,20 @@ def test_manager_forward_contains_sheet_and_company_identification(db: Session, 
     reply = EmailMessage(); reply["From"] = delivery.recipient_email; reply["Message-ID"] = "<manager-reply@example.test>"; reply["In-Reply-To"] = delivery.message_id; reply.set_content("Интересно, пришлите каталог")
     assert process_inbound(db, account, reply.as_bytes(), 52, 7) is True
     content = smtp.message.get_body(("plain",)).get_content()
-    for value in (direction.name, "Кафе", company.company_name, str(17), company.id, delivery.recipient_email, delivery.subject, "Интересно, пришлите каталог"):
+    for value in (
+        direction.name, "Кафе", company.company_name, str(17), company.id,
+        delivery.recipient_email, delivery.subject, "Интересно, пришлите каталог",
+        company.region, company.address, company.company_phone, company.website,
+        company.inn, company.decision_maker_name, company.decision_maker_position,
+        company.decision_maker_email, company.decision_maker_phone,
+    ):
         assert value in content
+    assert "Карточка клиента" in content
+    assert "https://docs.google.com/spreadsheets/d/sheet/edit#range=%27%D0%9A%D0%B0%D1%84%D0%B5%27%21A17" in content
+    html_content = smtp.message.get_body(("html",)).get_content()
+    assert "Карточка клиента" in html_content
+    assert "Открыть строку в Google Таблице" in html_content
+    assert company.decision_maker_email in html_content
     assert db.scalar(select(InboundReply)).forwarded_at is not None
 
 
