@@ -13,7 +13,7 @@ from app.models import Campaign, Direction, DirectionRun, MailAccount, SourceJob
 from app.services.collection import execute_job
 from app.services.direction_pipeline import execute_direction_pipeline
 from app.services.imap_monitor import poll_mailbox
-from app.services.mailing import execute_campaign, process_queue
+from app.services.mailing import execute_campaign, process_queue, reconcile_sent_copies
 from app.services.google_sheets import active_sheets_config
 from app.services.sheet_personalization import process_sheet_personalization_triggers
 
@@ -102,6 +102,13 @@ def drain_email_queue() -> None:
             logger.info("Email queue processed: %s", result)
 
 
+def repair_sent_folder() -> None:
+    with SessionLocal() as session:
+        result = reconcile_sent_copies(session)
+        if any(result.values()):
+            logger.info("Sent folder reconciliation: %s", result)
+
+
 def poll_sheet_personalizations() -> None:
     with SessionLocal() as session:
         config = active_sheets_config(session, get_settings())
@@ -147,6 +154,7 @@ def main() -> None:
     scheduler.add_job(refresh_campaigns, "interval", seconds=60, id="refresh-campaigns", replace_existing=True)
     scheduler.add_job(poll_imap, "interval", minutes=5, id="imap", replace_existing=True, max_instances=1)
     scheduler.add_job(drain_email_queue, "interval", seconds=10, id="email-queue", replace_existing=True, max_instances=1)
+    scheduler.add_job(repair_sent_folder, "interval", minutes=10, id="sent-folder", replace_existing=True, max_instances=1)
     scheduler.add_job(poll_sheet_personalizations, "interval", seconds=60, id="sheet-personalization", replace_existing=True, max_instances=1)
     scheduler.start()
 

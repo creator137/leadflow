@@ -6,6 +6,7 @@ import re
 import secrets
 import smtplib
 import socket
+from email import message_from_bytes
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, formataddr, make_msgid
@@ -14,12 +15,12 @@ from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
 
 from jinja2 import Environment, StrictUndefined, select_autoescape
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings, is_branded_https_url, is_public_https_url
-from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailTemplate, MailAccount, SenderSettings, Suppression, TrackedLink
+from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailEvent, EmailTemplate, MailAccount, SenderSettings, Suppression, TrackedLink
 from app.services.campaign_templates import sync_direction_campaign_template
 from app.services.secrets import decrypt_secret
 from app.services.email_events import record_email_event, sync_email_event_to_sheets
@@ -193,10 +194,10 @@ def save_sent_copy(account: MailAccount, message: EmailMessage, sent_at: datetim
             pass
 
 
-def build_email_message(delivery: EmailDelivery, account: MailAccount) -> EmailMessage:
+def build_email_message(delivery: EmailDelivery, account: MailAccount, *, message_date: datetime | None = None) -> EmailMessage:
     message = EmailMessage()
     message["Subject"], message["From"], message["To"] = delivery.subject, formataddr((account.from_name or account.name, account.from_email)), delivery.recipient_email
-    message["Date"] = format_datetime(now_utc())
+    message["Date"] = format_datetime(message_date or now_utc())
     if account.reply_to: message["Reply-To"] = account.reply_to
     message["Message-ID"] = delivery.message_id
     if delivery.unsubscribe_url:
@@ -425,6 +426,7 @@ def send_claimed_delivery(session: Session, delivery_id: str, worker_id: str) ->
             record_email_event(session, delivery, "sent")
             try:
                 save_sent_copy(account, message, delivery.sent_at)
+                record_email_event(session, delivery, "sent_copy_saved")
             except Exception:
                 # SMTP has already accepted the message. A failed IMAP append must
                 # never trigger a retry and send a duplicate to the recipient.
@@ -447,6 +449,90 @@ def send_claimed_delivery(session: Session, delivery_id: str, worker_id: str) ->
     session.commit()
     sync_email_event_to_sheets(session, delivery)
     return delivery.status
+
+
+def _sent_message_ids(account: MailAccount, sent_at: datetime) -> set[str]:
+    """Read a small date window; Yandex does not reliably support HEADER SEARCH."""
+    client = imap_connection(account)
+    try:
+        client.login(account.imap_login, decrypt_secret(account.imap_password_encrypted))
+        folder = _sent_folder(client)
+        status, _ = client.select(f'"{folder}"', readonly=True)
+        if status != "OK":
+            raise imaplib.IMAP4.error("Не удалось открыть папку «Отправленные»")
+        start = (sent_at - timedelta(days=1)).strftime("%d-%b-%Y")
+        end = (sent_at + timedelta(days=2)).strftime("%d-%b-%Y")
+        status, rows = client.search(None, "SINCE", start, "BEFORE", end)
+        if status != "OK":
+            raise imaplib.IMAP4.error("Не удалось проверить папку «Отправленные»")
+        numbers = (rows[0] or b"").split() if rows else []
+        found: set[str] = set()
+        for offset in range(0, len(numbers), 20):
+            batch = b",".join(numbers[offset:offset + 20]).decode("ascii")
+            status, parts = client.fetch(batch, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            if status != "OK":
+                raise imaplib.IMAP4.error("Не удалось проверить письма в «Отправленных»")
+            for part in parts:
+                if isinstance(part, tuple):
+                    message_id = message_from_bytes(part[1]).get("Message-ID")
+                    if message_id:
+                        found.add(message_id.strip())
+        return found
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+
+def reconcile_sent_copies(session: Session, *, limit: int = 5) -> dict[str, int]:
+    """Restore missing IMAP copies without sending the customer another email."""
+    cutoff = now_utc() - timedelta(days=7)
+    already_saved = exists(select(EmailEvent.id).where(
+        EmailEvent.delivery_id == EmailDelivery.id,
+        EmailEvent.event_type == "sent_copy_saved",
+    ))
+    deliveries = list(session.scalars(select(EmailDelivery).where(
+        EmailDelivery.sent_at >= cutoff,
+        EmailDelivery.sent_at <= now_utc() - timedelta(minutes=5),
+        EmailDelivery.message_id.is_not(None),
+        ~already_saved,
+    ).order_by(EmailDelivery.sent_at).limit(100)))
+    result = {"already_present": 0, "restored": 0, "errors": 0}
+    checked: dict[tuple[str, str], set[str] | None] = {}
+    for delivery in deliveries:
+        account = session.get(MailAccount, delivery.mailbox_id)
+        if not account or not delivery.sent_at:
+            continue
+        day = delivery.sent_at.strftime("%Y-%m-%d")
+        key = (account.id, day)
+        if key not in checked:
+            try:
+                checked[key] = _sent_message_ids(account, delivery.sent_at)
+            except Exception:
+                logger.exception("Could not inspect sent folder for mailbox %s", account.id)
+                result["errors"] += 1
+                checked[key] = None
+        if checked[key] is None:
+            continue
+        if delivery.message_id in checked[key]:
+            record_email_event(session, delivery, "sent_copy_saved", {"reconciled": True})
+            session.commit()
+            result["already_present"] += 1
+            continue
+        if result["restored"] + result["errors"] >= limit:
+            continue
+        try:
+            message = build_email_message(delivery, account, message_date=delivery.sent_at)
+            save_sent_copy(account, message, delivery.sent_at)
+            record_email_event(session, delivery, "sent_copy_saved", {"restored": True})
+            session.commit()
+            checked[key].add(delivery.message_id)
+            result["restored"] += 1
+        except Exception:
+            logger.exception("Could not restore sent copy for delivery %s", delivery.id)
+            result["errors"] += 1
+    return result
 
 
 def process_queue(session: Session, settings: Settings, worker_id: str, limit: int = 10) -> dict[str, int]:

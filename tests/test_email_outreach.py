@@ -1,5 +1,5 @@
 from email.message import EmailMessage
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -10,7 +10,7 @@ from app.db import Base
 from app.models import Campaign, Company, CompanyDirection, Direction, EmailDelivery, EmailEvent, EmailTemplate, GoogleSheetsConfig, InboundReply, MailAccount, SheetRowMapping, Suppression, TrackedLink
 from app.schemas import MailAccountRead
 from app.services.imap_monitor import classify_bounce, poll_mailbox, process_inbound
-from app.services.mailing import build_delivery, build_email_message, claim_delivery, diagnose_smtp, queue_campaign, send_claimed_delivery, send_delivery
+from app.services.mailing import build_delivery, build_email_message, claim_delivery, diagnose_smtp, queue_campaign, reconcile_sent_copies, send_claimed_delivery, send_delivery
 from app.services.secrets import encrypt_secret
 
 
@@ -187,7 +187,7 @@ def test_atomic_claim_and_send_updates_company(db: Session, monkeypatch) -> None
     assert folder == "Sent" and flags == r"(\Seen)"
     assert delivery.message_id.encode() in raw_message
     assert delivery.recipient_email.encode() in raw_message
-    assert [row.event_type for row in db.scalars(select(EmailEvent).order_by(EmailEvent.occurred_at))] == ["queued", "sending", "sent"]
+    assert [row.event_type for row in db.scalars(select(EmailEvent).order_by(EmailEvent.occurred_at))] == ["queued", "sending", "sent", "sent_copy_saved"]
 
 
 def test_sent_copy_failure_does_not_resend_or_downgrade_delivery(db: Session, monkeypatch) -> None:
@@ -204,6 +204,41 @@ def test_sent_copy_failure_does_not_resend_or_downgrade_delivery(db: Session, mo
     assert send_claimed_delivery(db, delivery.id, "worker-a") == "sent"
     db.refresh(delivery)
     assert delivery.status == "sent" and delivery.attempt_count == 1
+
+
+def test_missing_sent_copy_is_restored_without_smtp_resend(db: Session, monkeypatch) -> None:
+    _, company, account, template = setup(db)
+    delivery = build_delivery(db, company, account, template, Settings(public_base_url="https://lead.test"))
+    smtp = FakeSMTP()
+    monkeypatch.setattr("app.services.mailing.smtp_connection", lambda _: smtp)
+    monkeypatch.setattr("app.services.mailing.save_sent_copy", lambda *_: (_ for _ in ()).throw(OSError("IMAP unavailable")))
+    assert claim_delivery(db, "worker-a") == delivery.id
+    assert send_claimed_delivery(db, delivery.id, "worker-a") == "sent"
+    delivery.sent_at = datetime.now(timezone.utc) - timedelta(minutes=6)
+    db.commit()
+
+    appended = []
+    monkeypatch.setattr("app.services.mailing._sent_message_ids", lambda *_: set())
+    monkeypatch.setattr("app.services.mailing.save_sent_copy", lambda *args: appended.append(args))
+    result = reconcile_sent_copies(db)
+
+    assert result == {"already_present": 0, "restored": 1, "errors": 0}
+    assert len(appended) == 1 and appended[0][1]["Message-ID"] == delivery.message_id
+    assert len([e for e in db.scalars(select(EmailEvent)) if e.event_type == "sent_copy_saved"]) == 1
+    assert reconcile_sent_copies(db) == {"already_present": 0, "restored": 0, "errors": 0}
+
+
+def test_reconciliation_does_not_duplicate_existing_sent_copy(db: Session, monkeypatch) -> None:
+    _, company, account, template = setup(db)
+    delivery = build_delivery(db, company, account, template, Settings(public_base_url="https://lead.test"))
+    delivery.status = "sent"
+    delivery.sent_at = datetime.now(timezone.utc) - timedelta(minutes=6)
+    delivery.message_id = "<already-saved@example.test>"
+    db.commit()
+    monkeypatch.setattr("app.services.mailing._sent_message_ids", lambda *_: {delivery.message_id})
+    monkeypatch.setattr("app.services.mailing.save_sent_copy", lambda *_: pytest.fail("Would duplicate an existing copy"))
+
+    assert reconcile_sent_copies(db) == {"already_present": 1, "restored": 0, "errors": 0}
 
 
 def test_unavailable_mailbox_records_error_and_defers_retry(db: Session) -> None:
