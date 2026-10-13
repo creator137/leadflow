@@ -59,6 +59,25 @@ def test_deterministic_structured_data_has_provenance() -> None:
     assert result["inn"][0] == "1234567890"
 
 
+def test_deterministic_email_in_footer_survives_compact_text_filter() -> None:
+    html = '<main>Компания</main><footer><span>sales@company.test</span></footer>'
+    compact_text, _ = _clean_html(html)
+    assert "sales@company.test" not in compact_text
+    page = WebsitePage("https://company.test/", compact_text, html)
+
+    assert _deterministic(WebsiteSnapshot([page]))["company_email"] == (
+        "sales@company.test", page.url, 0.85, "website_regex",
+    )
+
+
+def test_deterministic_email_ignores_script_only_address() -> None:
+    page = WebsitePage(
+        "https://company.test/", "Компания",
+        '<main>Компания</main><script>const test = "internal@company.test"</script>',
+    )
+    assert "company_email" not in _deterministic(WebsiteSnapshot([page]))
+
+
 def test_compact_context_keeps_each_relevant_page_within_limit() -> None:
     snapshot = WebsiteSnapshot([
         WebsitePage("https://company.test", "A" * 5000),

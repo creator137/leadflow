@@ -226,7 +226,12 @@ def _deterministic(snapshot: WebsiteSnapshot) -> dict[str, tuple[object, str, fl
                     if value not in (None, "") and name not in found:
                         found[name] = (value, page.url, 0.99, "website_structured_data")
         mailtos = {str(link.get("href"))[7:].split("?", 1)[0].strip().casefold() for link in soup.select('a[href^="mailto:"]')}
-        for candidate in mailtos | {item.casefold() for item in EMAIL_RE.findall(page.text)}:
+        # The compact AI context omits navigation and footers, where public
+        # contact addresses often live. Search visible HTML separately.
+        for tag in soup.select("script,style,noscript,svg,iframe,form"):
+            tag.decompose()
+        visible_text = soup.get_text(" ", strip=True) if page.html else page.text
+        for candidate in mailtos | {item.casefold() for item in EMAIL_RE.findall(visible_text)}:
             domain = candidate.rsplit("@", 1)[-1]
             if "@" in candidate and domain not in BAD_DOMAINS and domain.rsplit(".", 1)[-1] not in BAD_TLDS:
                 emails.append((1.0 if candidate in mailtos else 0.85, candidate, page.url))
@@ -286,6 +291,7 @@ AI_INSTRUCTIONS = """Извлеки только запрошенные пуст
 названного владельца, основателя, управляющего, генерального/коммерческого директора или руководителя закупок.
 Шеф-повар, автор меню и другие сотрудники без управленческой роли не являются ЛПР. Ответ — только JSON по схеме."""
 ENRICHMENT_PROMPT_VERSION = "website-enrichment-v3"
+CONTACT_SCAN_VERSION = 2
 
 
 def _validated_ai_values(result: AIEnrichmentResult, snapshot: WebsiteSnapshot, missing: list[str]) -> dict[str, tuple[object, str, str]]:
@@ -328,7 +334,12 @@ class WebsiteAnalysisService:
         if not company.website:
             return {"pages": 0, "deterministic": 0, "ai": 0, "ai_called": False, "missing_fields": []}
         previous = self.session.scalar(select(WebsiteAnalysis).where(WebsiteAnalysis.company_id == company.id))
-        reused_website_cache = previous is not None and not refresh and previous.website == company.website
+        # Older cached page blocks excluded footer emails. Revisit each
+        # affected site once, then retain the normal cache behavior.
+        reused_website_cache = (
+            previous is not None and not refresh and previous.website == company.website
+            and (bool(company.company_email) or (previous.deterministic_fields or {}).get("_contact_scan_version") == CONTACT_SCAN_VERSION)
+        )
         snapshot = crawl_website(company.website) if not reused_website_cache else WebsiteSnapshot([
             WebsitePage(block["url"], block["text"], "", 0) for block in previous.page_blocks
         ])
@@ -337,6 +348,8 @@ class WebsiteAnalysisService:
         deterministic = 0
         deterministic_values: dict[str, object] = dict(previous.deterministic_fields or {}) if reused_website_cache else {}
         extracted = {} if reused_website_cache else _deterministic(snapshot)
+        if not reused_website_cache:
+            deterministic_values["_contact_scan_version"] = CONTACT_SCAN_VERSION
         for name, (value, url, confidence, method) in extracted.items():
             deterministic_values[name] = value
             if getattr(company, name, None) in (None, ""):
