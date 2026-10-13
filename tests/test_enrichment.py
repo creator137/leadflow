@@ -78,6 +78,14 @@ def test_deterministic_email_ignores_script_only_address() -> None:
     assert "company_email" not in _deterministic(WebsiteSnapshot([page]))
 
 
+def test_deterministic_email_ignores_template_placeholder_domain() -> None:
+    page = WebsitePage(
+        "https://company.test/", "Компания",
+        '<footer>Сайт создан по шаблону: hello@mysite.com</footer>',
+    )
+    assert "company_email" not in _deterministic(WebsiteSnapshot([page]))
+
+
 def test_compact_context_keeps_each_relevant_page_within_limit() -> None:
     snapshot = WebsiteSnapshot([
         WebsitePage("https://company.test", "A" * 5000),

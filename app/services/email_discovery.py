@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 CONTACT_WORDS = ("contact", "contacts", "kontakty", "контакт", "about", "о-компании", "реквизит")
 BAD_TLDS = {"png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "css", "js"}
-BAD_DOMAINS = {"example.com", "sentry.io", "wixpress.com", "schema.org", "w3.org"}
+BAD_DOMAINS = {"example.com", "mysite.com", "sentry.io", "wixpress.com", "schema.org", "w3.org"}
 
 
 @dataclass(frozen=True, slots=True)
