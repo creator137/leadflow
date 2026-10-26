@@ -27,6 +27,9 @@ class _YandexOrganization:
     branches_count: int | None
     url: str | None
     raw: dict
+    search_page: int | None = None
+    search_index: int | None = None
+    search_page_size: int | None = None
 
 
 def _parse_org(item: dict) -> _YandexOrganization:
@@ -119,28 +122,43 @@ class YandexMapsAdapter(SourceAdapter):
                     time.sleep(0.5 * attempt)
         raise SourceError(f"Yandex Maps request failed after {attempts} attempts: {last_error}")
 
-    def _collect_http(self, url: str, *, limit: int, timeout: float, attempts: int):
+    def _collect_http(
+        self, url: str, *, limit: int, timeout: float, attempts: int,
+        start_page: int = 1, start_index: int = 0, max_pages: int = 10,
+    ):
         from yamaps_parser import DEFAULT_HEADERS
 
         collected = {}
+        exhausted = False
         with httpx.Client(
             headers=DEFAULT_HEADERS,
             follow_redirects=True,
             timeout=timeout,
             transport=self.transport,
         ) as client:
-            for page_number in range(1, 11):
+            for page_number in range(start_page, start_page + max_pages):
                 response = self._fetch_page(client, _page_url(url, page_number), attempts=attempts)
                 page_items = self._organizations_from_html(response.text)
+                if not page_items:
+                    exhausted = True
+                    break
                 before = len(collected)
-                for organization in page_items:
-                    if organization.id:
+                for position, organization in enumerate(page_items):
+                    if page_number == start_page and position < start_index:
+                        continue
+                    if organization.id and organization.id not in collected:
+                        organization.search_page = page_number
+                        organization.search_index = position
+                        organization.search_page_size = len(page_items)
                         collected[organization.id] = organization
                     if len(collected) >= limit:
                         break
-                if len(collected) >= limit or not page_items or len(collected) == before:
+                if len(collected) >= limit:
                     break
-        return list(collected.values())[:limit]
+                if len(collected) == before and not (page_number == start_page and start_index >= len(page_items)):
+                    exhausted = True
+                    break
+        return list(collected.values())[:limit], exhausted
 
     def collect(self, spec: SearchSpec) -> Iterable[CompanyLead]:
         try:
@@ -153,6 +171,7 @@ class YandexMapsAdapter(SourceAdapter):
             )
 
             force_browser = bool(spec.options.get("force_browser", False))
+            spec.options["_source_exhausted"] = False
             if force_browser:
                 geo = geocode(spec.city)
                 url = build_search_url(spec.query, center=geo["center"], span=geo["span"])
@@ -190,25 +209,35 @@ class YandexMapsAdapter(SourceAdapter):
                     else:
                         raise SourceError(f"Yandex Maps geocoding failed after {attempts} attempts: {geocode_error}")
                 url = build_search_url(spec.query, center=geo["center"], span=geo["span"])
-                organizations = self._collect_http(
+                start_page = max(1, int(spec.options.get("start_page", 1)))
+                start_index = max(0, int(spec.options.get("start_index", 0)))
+                max_pages = max(1, min(int(spec.options.get("max_pages", 10)), 20))
+                organizations, exhausted = self._collect_http(
                     url,
                     limit=spec.limit,
                     timeout=timeout,
                     attempts=attempts,
+                    start_page=start_page,
+                    start_index=start_index,
+                    max_pages=max_pages,
                 )
-                if not organizations:
+                if not organizations and start_page == 1:
                     # A second public-page shape is useful when a viewport-specific
                     # request yields no stack results. The city remains part of the
                     # query, so this does not silently broaden the requested area.
                     fallback_url = "https://yandex.ru/maps/?" + urlencode(
                         {"text": f"{spec.query} {spec.city}".strip()}
                     )
-                    organizations = self._collect_http(
+                    organizations, exhausted = self._collect_http(
                         fallback_url,
                         limit=spec.limit,
                         timeout=timeout,
                         attempts=attempts,
+                        start_page=start_page,
+                        start_index=start_index,
+                        max_pages=max_pages,
                     )
+                spec.options["_source_exhausted"] = exhausted
             # LeadFlow enriches websites itself so it can retain page URL,
             # method and confidence. Upstream enrichment remains available only
             # for compatibility when explicitly requested.
@@ -236,4 +265,7 @@ class YandexMapsAdapter(SourceAdapter):
                 website=org.site,
                 branches_count=getattr(org, "branches_count", None),
                 raw_data=raw,
+                source_page=org.search_page if isinstance(org, _YandexOrganization) else None,
+                source_index=org.search_index if isinstance(org, _YandexOrganization) else None,
+                source_page_size=org.search_page_size if isinstance(org, _YandexOrganization) else None,
             )

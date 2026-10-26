@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from app.services.provenance import apply_field
 from app.services.region_catalog import cities_for_region
 from app.sources.base import SearchSpec, SourceBlocked
 from app.sources.factory import build_adapter
+from app.sources.two_gis.adapter import TwoGisAdapter
 
 
 def _source_record(session: Session, company_id: str, lead, query: str, city: str) -> None:
@@ -113,8 +114,24 @@ def execute_direction(
     sources = list(session.scalars(select(DirectionSource).where(
         DirectionSource.direction_id == direction.id, DirectionSource.active.is_(True),
     ).order_by(DirectionSource.source)))
-    combinations = [(location, query, source) for location in locations for query in queries for source in sources]
+    unsupported_two_gis_cities = (
+        {location.city for location in locations if not TwoGisAdapter.supports_city(location.city)}
+        if any(source.source == "two_gis" for source in sources) else set()
+    )
+    combinations = [
+        (location, query, source)
+        for location in locations for query in queries for source in sources
+        if source.source != "two_gis" or location.city not in unsupported_two_gis_cities
+    ]
     search_cursor = dict(direction.search_cursor or {})
+    known_source_ids = {
+        (source, external_id)
+        for source, external_id in session.execute(
+            select(CompanySourceRecord.source, CompanySourceRecord.source_external_id)
+            .join(CompanyDirection, CompanyDirection.company_id == CompanySourceRecord.company_id)
+            .where(CompanyDirection.direction_id == direction.id, CompanySourceRecord.source_external_id.is_not(None))
+        )
+    }
     start_combo = int((run.checkpoint or {}).get("combo_index", 0))
     blocked = failed = 0
 
@@ -125,9 +142,25 @@ def execute_direction(
         if remaining <= 0:
             break
         cursor_key = f"{location.key}:{query.id}:{source.id}"
-        cursor_offset = max(0, int((search_cursor.get(cursor_key) or {}).get("offset", 0)))
-        scan_step = max(30, remaining * 5)
-        scan_limit = min(settings.source_max_scan, max(remaining, cursor_offset + scan_step))
+        cursor = dict(search_cursor.get(cursor_key) or {})
+        cursor_offset = max(0, int(cursor.get("offset", 0)))
+        paged = source.source == "yandex_maps"
+        exhausted_at = None
+        if paged and cursor.get("exhausted_at"):
+            try:
+                exhausted_at = datetime.fromisoformat(cursor["exhausted_at"])
+            except (TypeError, ValueError):
+                pass
+        probe_only = bool(exhausted_at and datetime.now(timezone.utc) - exhausted_at < timedelta(days=7))
+        scan_step = max(30, remaining * (2 if paged else 5))
+        scan_limit = min(settings.source_max_scan, 25 if probe_only else (scan_step if paged else max(remaining, cursor_offset + scan_step)))
+        options = {"enrich_emails": direction.email_enrichment_enabled, "use_grid": False}
+        if paged:
+            options.update({
+                "start_page": 1 if probe_only or exhausted_at else max(1, int(cursor.get("page", 1))),
+                "start_index": 0 if probe_only or exhausted_at else max(0, int(cursor.get("index", 0))),
+                "max_pages": 1 if probe_only else 10,
+            })
         spec = SearchSpec(
             category=query.query,
             city=location.city,
@@ -135,7 +168,7 @@ def execute_direction(
             # A direction combines multiple queries/sources; the bounded list
             # search is preferable to the city-wide grid used by exhaustive
             # one-off Parser Core jobs.
-            options={"enrich_emails": direction.email_enrichment_enabled, "use_grid": False},
+            options=options,
         )
         adapter = build_adapter(source.source, settings)
         inserted_before_combo = run.inserted
@@ -146,7 +179,16 @@ def execute_direction(
         stopped_early = False
         try:
             for yielded, lead in enumerate(adapter.collect(spec), start=1):
-                if yielded <= cursor_offset:
+                if not paged and yielded <= cursor_offset:
+                    continue
+                if paged and lead.source_page is not None and lead.source_index is not None:
+                    next_page = lead.source_page + int(lead.source_index + 1 >= (lead.source_page_size or 1))
+                    next_index = 0 if next_page > lead.source_page else lead.source_index + 1
+                    search_cursor[cursor_key] = {"version": 2, "page": next_page, "index": next_index}
+                    if probe_only:
+                        search_cursor[cursor_key]["exhausted_at"] = cursor["exhausted_at"]
+                    direction.search_cursor = dict(search_cursor)
+                if lead.source_external_id and (source.source, lead.source_external_id) in known_source_ids:
                     continue
                 if not lead.company_name or lead.company_name == "Unknown name":
                     continue
@@ -160,6 +202,8 @@ def execute_direction(
                 result = upsert_lead(session, lead)
                 _parser_provenance(session, result.company, lead, location.region)
                 _source_record(session, result.company.id, lead, query.query, location.city)
+                if lead.source_external_id:
+                    known_source_ids.add((source.source, lead.source_external_id))
                 if result.inserted:
                     session.add(CompanyDirection(company_id=result.company.id, direction_id=direction.id))
                     run.inserted += 1
@@ -182,20 +226,25 @@ def execute_direction(
                     "city": location.city,
                     "source": source.source,
                 }
-                search_cursor[cursor_key] = {
-                    "offset": yielded,
-                    "last_external_id": lead.source_external_id,
-                    "last_source_url": lead.source_url,
-                }
-                direction.search_cursor = dict(search_cursor)
+                if not paged or lead.source_page is None:
+                    search_cursor[cursor_key] = {
+                        "offset": yielded,
+                        "last_external_id": lead.source_external_id,
+                        "last_source_url": lead.source_url,
+                    }
+                    direction.search_cursor = dict(search_cursor)
                 session.commit()
                 if run.inserted >= run.limit_new or run.inserted - inserted_before_combo >= combo_target:
                     stopped_early = True
                     break
             if not stopped_early:
-                # The current result window was exhausted. Start from the top
-                # on the next day so newly appeared high-ranking cards are not missed.
-                if yielded < scan_limit or yielded >= settings.source_max_scan:
+                if paged and spec.options.get("_source_exhausted"):
+                    search_cursor[cursor_key] = {
+                        "version": 2, "page": 1, "index": 0,
+                        "exhausted_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    direction.search_cursor = dict(search_cursor)
+                elif not paged and (yielded < scan_limit or yielded >= settings.source_max_scan):
                     search_cursor[cursor_key] = {"offset": 0}
                     direction.search_cursor = dict(search_cursor)
             combo_completed = run.inserted < run.limit_new
@@ -235,6 +284,8 @@ def execute_direction(
         run.status = "failed"
     else:
         run.status = "exhausted"
+    if unsupported_two_gis_cities and not run.message:
+        run.message = f"2ГИС: городов без поддержки в каталоге источника — {len(unsupported_two_gis_cities)}."
     run.finished_at = datetime.now(timezone.utc)
     session.commit()
     return run

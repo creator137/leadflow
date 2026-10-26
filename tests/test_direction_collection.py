@@ -213,6 +213,96 @@ def test_daily_cursor_continues_deeper_in_same_result_list(monkeypatch) -> None:
         assert next(iter(direction.search_cursor.values()))["offset"] == 4
 
 
+def test_yandex_cursor_resumes_at_page_and_position(monkeypatch) -> None:
+    seen_starts = []
+
+    class PagedAdapter(SourceAdapter):
+        name = "yandex_maps"
+
+        def collect(self, spec):
+            start = (spec.options["start_page"], spec.options["start_index"])
+            seen_starts.append(start)
+            for page in range(start[0], 4):
+                for index in range(start[1] if page == start[0] else 0, 3):
+                    number = (page - 1) * 3 + index
+                    yield CompanyLead(
+                        source=self.name, source_external_id=f"page-{page}-card-{index}",
+                        source_url=f"https://maps.test/{page}/{index}",
+                        company_name=f"Компания {number}", phone=f"+7 999 700-01-{number:02d}",
+                        source_page=page, source_index=index, source_page_size=3,
+                    )
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction = create_direction(session, DirectionCreate(
+            name="Постраничный поиск", sheet_tab="Постраничный поиск", limit_new=2,
+            queries=[DirectionQueryInput(query="кейтеринг")],
+            locations=[DirectionLocationInput(city="Москва")], sources=["yandex_maps"],
+        ))
+        monkeypatch.setattr("app.services.direction_collection.build_adapter", lambda *_: PagedAdapter())
+        settings = Settings(database_url="sqlite+pysqlite:///:memory:")
+
+        for _ in range(3):
+            assert execute_direction(session, direction, settings).inserted == 2
+
+        assert seen_starts == [(1, 0), (1, 2), (2, 1)]
+        assert session.query(Company).count() == 6
+        assert next(iter(direction.search_cursor.values())) == {"version": 2, "page": 3, "index": 0}
+
+
+def test_exhausted_yandex_search_probes_head_without_reprocessing_old_card(monkeypatch) -> None:
+    seen_options = []
+
+    class FinishedAdapter(SourceAdapter):
+        name = "yandex_maps"
+
+        def collect(self, spec):
+            seen_options.append(dict(spec.options))
+            yield CompanyLead(
+                source=self.name, source_external_id="known-card", source_url="https://maps.test/known",
+                company_name="Компания", phone="+7 999 700-02-01",
+                source_page=1, source_index=0, source_page_size=1,
+            )
+            spec.options["_source_exhausted"] = True
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction = create_direction(session, DirectionCreate(
+            name="Завершённый поиск", sheet_tab="Завершённый поиск", limit_new=2,
+            queries=[DirectionQueryInput(query="кейтеринг")],
+            locations=[DirectionLocationInput(city="Москва")], sources=["yandex_maps"],
+        ))
+        monkeypatch.setattr("app.services.direction_collection.build_adapter", lambda *_: FinishedAdapter())
+        settings = Settings(database_url="sqlite+pysqlite:///:memory:")
+
+        first = execute_direction(session, direction, settings)
+        second = execute_direction(session, direction, settings)
+
+        assert first.inserted == 1 and second.inserted == 0
+        assert second.scanned == 0 and second.duplicates == 0
+        assert seen_options[0]["max_pages"] == 10 and seen_options[1]["max_pages"] == 1
+        assert next(iter(direction.search_cursor.values()))["exhausted_at"]
+
+
+def test_unsupported_two_gis_city_is_skipped_without_error(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction = create_direction(session, DirectionCreate(
+            name="Неподдерживаемый город", sheet_tab="Неподдерживаемый город", limit_new=2,
+            queries=[DirectionQueryInput(query="кейтеринг")],
+            locations=[DirectionLocationInput(city="Выборг")], sources=["two_gis"],
+        ))
+        monkeypatch.setattr("app.services.direction_collection.build_adapter", lambda *_: (_ for _ in ()).throw(AssertionError("2GIS should not start")))
+
+        run = execute_direction(session, direction, Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+        assert run.inserted == 0 and run.errors == 0
+        assert "городов без поддержки в каталоге источника — 1" in run.message
+
+
 def test_cross_source_company_is_canonical_and_provenance_retained(monkeypatch) -> None:
     class SameCompanyAdapter(SourceAdapter):
         def __init__(self, source): self.name = source

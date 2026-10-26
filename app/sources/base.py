@@ -44,6 +44,9 @@ class CompanyLead:
     contact_person: str | None = None
     collected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     raw_data: dict[str, Any] = field(default_factory=dict)
+    source_page: int | None = None
+    source_index: int | None = None
+    source_page_size: int | None = None
 
 
 class SourceAdapter(ABC):

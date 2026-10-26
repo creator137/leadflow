@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Iterable
@@ -72,13 +73,22 @@ class TwoGisAdapter(SourceAdapter):
 
     @staticmethod
     def _city(city_name: str) -> tuple[str, str]:
+        wanted = city_name.casefold().strip()
+        city = TwoGisAdapter._cities().get(wanted)
+        if city:
+            return city
+        raise SourceError(f"2GIS city is not present in upstream catalog: {city_name}")
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _cities() -> dict[str, tuple[str, str]]:
         data_file = files("parser_2gis").joinpath("data/cities.json")
         cities = json.loads(data_file.read_text(encoding="utf-8"))
-        wanted = city_name.casefold().strip()
-        for city in cities:
-            if city["name"].casefold() == wanted:
-                return city["code"], city["domain"]
-        raise SourceError(f"2GIS city is not present in upstream catalog: {city_name}")
+        return {city["name"].casefold().strip(): (city["code"], city["domain"]) for city in cities}
+
+    @classmethod
+    def supports_city(cls, city_name: str) -> bool:
+        return city_name.casefold().strip() in cls._cities()
 
     def _fetch(self, client: httpx.Client, url: str, *, attempts: int) -> httpx.Response:
         last_error: Exception | None = None

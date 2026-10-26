@@ -52,6 +52,31 @@ def test_yandex_page_url_keeps_viewport_parameters() -> None:
     assert "text=x" in result and "ll=1%2C2" in result and "page=2" in result
 
 
+def test_yandex_collection_starts_from_saved_page_beyond_ten() -> None:
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", "1"))
+        requested.append(page)
+        items = [
+            {"type": "business", "id": f"{page}-{index}", "title": f"Компания {page}-{index}"}
+            for index in range(2)
+        ] if page <= 12 else []
+        return httpx.Response(200, text=_yandex_state({"stack": [{"results": {"items": items}}]}))
+
+    adapter = YandexMapsAdapter(transport=httpx.MockTransport(handler))
+    leads, exhausted = adapter._collect_http(
+        "https://yandex.ru/maps/?text=кейтеринг", limit=10, timeout=5,
+        attempts=1, start_page=11, start_index=1,
+    )
+
+    assert requested == [11, 12, 13]
+    assert [(item.id, item.search_page, item.search_index, item.search_page_size) for item in leads] == [
+        ("11-1", 11, 1, 2), ("12-0", 12, 0, 2), ("12-1", 12, 1, 2),
+    ]
+    assert exhausted is True
+
+
 def test_two_gis_reads_modern_ssr_profiles_and_details() -> None:
     search_item = {
         "id": "7001",
