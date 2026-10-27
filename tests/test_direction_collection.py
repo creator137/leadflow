@@ -215,6 +215,7 @@ def test_daily_cursor_continues_deeper_in_same_result_list(monkeypatch) -> None:
 
 def test_yandex_cursor_resumes_at_page_and_position(monkeypatch) -> None:
     seen_starts = []
+    seen_limits = []
 
     class PagedAdapter(SourceAdapter):
         name = "yandex_maps"
@@ -222,6 +223,7 @@ def test_yandex_cursor_resumes_at_page_and_position(monkeypatch) -> None:
         def collect(self, spec):
             start = (spec.options["start_page"], spec.options["start_index"])
             seen_starts.append(start)
+            seen_limits.append(spec.limit)
             for page in range(start[0], 4):
                 for index in range(start[1] if page == start[0] else 0, 3):
                     number = (page - 1) * 3 + index
@@ -247,6 +249,7 @@ def test_yandex_cursor_resumes_at_page_and_position(monkeypatch) -> None:
             assert execute_direction(session, direction, settings).inserted == 2
 
         assert seen_starts == [(1, 0), (1, 2), (2, 1)]
+        assert seen_limits == [150, 150, 150]
         assert session.query(Company).count() == 6
         assert next(iter(direction.search_cursor.values())) == {"version": 2, "page": 3, "index": 0}
 
@@ -282,7 +285,7 @@ def test_exhausted_yandex_search_probes_head_without_reprocessing_old_card(monke
 
         assert first.inserted == 1 and second.inserted == 0
         assert second.scanned == 0 and second.duplicates == 0
-        assert seen_options[0]["max_pages"] == 10 and seen_options[1]["max_pages"] == 1
+        assert seen_options[0]["max_pages"] == 20 and seen_options[1]["max_pages"] == 1
         assert next(iter(direction.search_cursor.values()))["exhausted_at"]
 
 

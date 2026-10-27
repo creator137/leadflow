@@ -364,9 +364,11 @@ def queue_campaign(session: Session, campaign: Campaign, settings: Settings) -> 
 
 
 def execute_campaign(session: Session, campaign: Campaign, settings: Settings) -> dict[str, int]:
-    campaign.last_run_at = now_utc()
     try:
         result = queue_campaign(session, campaign, settings)
+        # queue_campaign may roll back while skipping an ineligible company.
+        # Record the actual run after that work so the timestamp survives.
+        campaign.last_run_at = now_utc()
         campaign.last_queued = result["queued"]
         campaign.last_error = None
         session.commit()

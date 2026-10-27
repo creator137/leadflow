@@ -90,7 +90,7 @@ class TwoGisAdapter(SourceAdapter):
     def supports_city(cls, city_name: str) -> bool:
         return city_name.casefold().strip() in cls._cities()
 
-    def _fetch(self, client: httpx.Client, url: str, *, attempts: int) -> httpx.Response:
+    def _fetch(self, client: httpx.Client, url: str, *, attempts: int, allow_not_found: bool = False) -> httpx.Response:
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
@@ -105,6 +105,8 @@ class TwoGisAdapter(SourceAdapter):
                 )
                 if response.status_code in {401, 403}:
                     raise SourceBlocked("2GIS returned an access-check page")
+                if allow_not_found and response.status_code == 404:
+                    return response
                 response.raise_for_status()
                 return response
             except SourceBlocked:
@@ -126,7 +128,9 @@ class TwoGisAdapter(SourceAdapter):
             timeout=timeout,
             transport=self.transport,
         ) as client:
-            response = self._fetch(client, search_url, attempts=attempts)
+            response = self._fetch(client, search_url, attempts=attempts, allow_not_found=True)
+            if response.status_code == 404:
+                return []
             items = _profile_items(_extract_initial_state(response.text))[: spec.limit]
             if not fetch_details:
                 return items

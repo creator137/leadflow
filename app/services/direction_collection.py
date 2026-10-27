@@ -152,14 +152,17 @@ def execute_direction(
             except (TypeError, ValueError):
                 pass
         probe_only = bool(exhausted_at and datetime.now(timezone.utc) - exhausted_at < timedelta(days=7))
-        scan_step = max(30, remaining * (2 if paged else 5))
+        # Popular cities can have several pages of already known cards. Search
+        # far enough in one run to reach new companies rather than advancing
+        # only a couple of pages per day.
+        scan_step = max(150, remaining * 5) if paged else max(30, remaining * 5)
         scan_limit = min(settings.source_max_scan, 25 if probe_only else (scan_step if paged else max(remaining, cursor_offset + scan_step)))
         options = {"enrich_emails": direction.email_enrichment_enabled, "use_grid": False}
         if paged:
             options.update({
                 "start_page": 1 if probe_only or exhausted_at else max(1, int(cursor.get("page", 1))),
                 "start_index": 0 if probe_only or exhausted_at else max(0, int(cursor.get("index", 0))),
-                "max_pages": 1 if probe_only else 10,
+                "max_pages": 1 if probe_only else 20,
             })
         spec = SearchSpec(
             category=query.query,

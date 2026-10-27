@@ -113,6 +113,14 @@ def test_two_gis_reads_modern_ssr_profiles_and_details() -> None:
     assert leads[0].source_url == "https://2gis.ru/moscow/firm/7001"
 
 
+def test_two_gis_missing_city_search_returns_no_results() -> None:
+    adapter = TwoGisAdapter(transport=httpx.MockTransport(
+        lambda request: httpx.Response(404, text="Not Found")
+    ))
+
+    assert list(adapter.collect(SearchSpec(category="кейтеринг", city="Москва", limit=10))) == []
+
+
 def test_two_gis_initial_state_does_not_require_legacy_stat_links() -> None:
     state = {"data": {"entity": {"profile": {"1": {"data": {"id": "1", "name": "Организация"}}}}}}
     assert _extract_initial_state(_two_gis_state(state)) == state
