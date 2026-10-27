@@ -77,6 +77,28 @@ def test_yandex_collection_starts_from_saved_page_beyond_ten() -> None:
     assert exhausted is True
 
 
+def test_yandex_city_tile_uses_its_own_viewport(monkeypatch) -> None:
+    requested = []
+    monkeypatch.setattr("yamaps_parser.geocode", lambda *_args, **_kwargs: {
+        "center": (2, 2), "span": (4, 4), "bbox": (0, 0, 4, 4),
+    })
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append((request.url.params.get("ll"), request.url.params.get("spn")))
+        return httpx.Response(200, text=_yandex_state({
+            "stack": [{"results": {"items": [{"type": "business", "id": "tile-card", "title": "Кейтеринг"}]}}],
+        }))
+
+    adapter = YandexMapsAdapter(transport=httpx.MockTransport(handler))
+    leads = list(adapter.collect(SearchSpec(
+        category="кейтеринг", city="Санкт-Петербург", limit=1,
+        options={"tile_index": 4, "tile_divisions": 2},
+    )))
+
+    assert len(leads) == 1
+    assert requested == [("3.000000,3.000000", "2.000000,2.000000")]
+
+
 def test_two_gis_reads_modern_ssr_profiles_and_details() -> None:
     search_item = {
         "id": "7001",

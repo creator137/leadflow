@@ -209,6 +209,20 @@ class YandexMapsAdapter(SourceAdapter):
                     else:
                         raise SourceError(f"Yandex Maps geocoding failed after {attempts} attempts: {geocode_error}")
                 url = build_search_url(spec.query, center=geo["center"], span=geo["span"])
+                tile_index = int(spec.options.get("tile_index", 0))
+                if tile_index:
+                    divisions = int(spec.options.get("tile_divisions", 4))
+                    if divisions < 1 or tile_index > divisions * divisions:
+                        raise ValueError("Invalid Yandex search tile")
+                    min_lon, min_lat, max_lon, max_lat = geo["bbox"]
+                    tile = tile_index - 1
+                    width = (max_lon - min_lon) / divisions
+                    height = (max_lat - min_lat) / divisions
+                    center = (
+                        min_lon + (tile % divisions + 0.5) * width,
+                        min_lat + (tile // divisions + 0.5) * height,
+                    )
+                    url = build_search_url(spec.query, center=center, span=(width, height))
                 start_page = max(1, int(spec.options.get("start_page", 1)))
                 start_index = max(0, int(spec.options.get("start_index", 0)))
                 max_pages = max(1, min(int(spec.options.get("max_pages", 10)), 20))

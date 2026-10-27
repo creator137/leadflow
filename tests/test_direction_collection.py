@@ -88,6 +88,40 @@ def test_explicit_city_is_searched_before_regional_cities(monkeypatch) -> None:
         assert visited[0] == "Санкт-Петербург"
 
 
+def test_petersburg_search_reaches_city_tiles(monkeypatch) -> None:
+    visited = []
+
+    class TileAdapter(SourceAdapter):
+        name = "yandex_maps"
+
+        def collect(self, spec):
+            tile = spec.options.get("tile_index", 0)
+            visited.append(tile)
+            if tile == 3:
+                yield CompanyLead(
+                    source=self.name, source_external_id="tile-3-company", source_url=None,
+                    company_name="Кейтеринг из района", city=spec.city,
+                    source_page=1, source_index=0, source_page_size=1,
+                )
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction = create_direction(session, DirectionCreate(
+            name="Петербург", sheet_tab="Петербург", limit_new=1,
+            queries=[DirectionQueryInput(query="кейтеринг")],
+            locations=[DirectionLocationInput(city="Санкт-Петербург")], sources=["yandex_maps"],
+        ))
+        monkeypatch.setattr("app.services.direction_collection.build_adapter", lambda *_: TileAdapter())
+
+        run = execute_direction(session, direction, Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+        assert run.errors == 0, run.message
+        assert run.inserted == 1
+        assert visited == [0, 1, 2, 3]
+        assert len(direction.search_cursor) == 1
+
+
 def test_catalog_covers_all_supported_russian_subjects() -> None:
     regions = available_regions()
 

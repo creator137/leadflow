@@ -69,6 +69,8 @@ class SearchLocation:
     key: str
     city: str
     region: str | None
+    tile_index: int = 0
+    tile_divisions: int = 0
 
 
 def expand_locations(locations: list[DirectionLocation]) -> list[SearchLocation]:
@@ -122,11 +124,20 @@ def execute_direction(
         {location.city for location in locations if not TwoGisAdapter.supports_city(location.city)}
         if any(source.source == "two_gis" for source in sources) else set()
     )
-    combinations = [
-        (location, query, source)
-        for location in locations for query in queries for source in sources
-        if source.source != "two_gis" or location.city not in unsupported_two_gis_cities
-    ]
+    combinations = []
+    for location in locations:
+        for query in queries:
+            for source in sources:
+                if source.source == "two_gis" and location.city in unsupported_two_gis_cities:
+                    continue
+                combinations.append((location, query, source))
+                if source.source == "yandex_maps" and location.city == "Санкт-Петербург":
+                    combinations.extend((
+                        SearchLocation(
+                            key=f"{location.key}:tile{tile_index}", city=location.city,
+                            region=location.region, tile_index=tile_index, tile_divisions=4,
+                        ), query, source,
+                    ) for tile_index in range(1, 17))
     search_cursor = dict(direction.search_cursor or {})
     known_source_ids = {
         (source, external_id)
@@ -168,6 +179,8 @@ def execute_direction(
                 "start_index": 0 if probe_only or exhausted_at else max(0, int(cursor.get("index", 0))),
                 "max_pages": 1 if probe_only else 20,
             })
+            if location.tile_index:
+                options.update({"tile_index": location.tile_index, "tile_divisions": location.tile_divisions})
         spec = SearchSpec(
             category=query.query,
             city=location.city,
