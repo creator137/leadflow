@@ -59,6 +59,35 @@ def test_moscow_oblast_location_expands_to_concrete_cities() -> None:
         assert len({item.key for item in expanded}) == 74
 
 
+def test_explicit_city_is_searched_before_regional_cities(monkeypatch) -> None:
+    visited = []
+
+    class EmptyAdapter(SourceAdapter):
+        name = "yandex_maps"
+
+        def collect(self, spec):
+            visited.append(spec.city)
+            return iter(())
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        direction = create_direction(session, DirectionCreate(
+            name="Город и область", sheet_tab="Город и область", limit_new=1,
+            queries=[DirectionQueryInput(query="кейтеринг")],
+            locations=[
+                DirectionLocationInput(city="Ленинградская область", region="Ленинградская область", scope="region"),
+                DirectionLocationInput(city="Санкт-Петербург"),
+            ],
+            sources=["yandex_maps"],
+        ))
+        monkeypatch.setattr("app.services.direction_collection.build_adapter", lambda *_: EmptyAdapter())
+
+        execute_direction(session, direction, Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+        assert visited[0] == "Санкт-Петербург"
+
+
 def test_catalog_covers_all_supported_russian_subjects() -> None:
     regions = available_regions()
 

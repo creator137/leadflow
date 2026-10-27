@@ -57,3 +57,40 @@ def test_one_broken_website_does_not_stop_direction_enrichment(monkeypatch) -> N
         execute_direction_pipeline(session, direction, Settings(_env_file=None))
 
     assert calls == ["Сломанный сайт", "Рабочий сайт"]
+
+
+def test_collected_rows_sync_before_slow_enrichment(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    calls = []
+
+    class FakeSync:
+        def __init__(self, *_args):
+            pass
+
+        def sync_direction(self, _direction):
+            calls.append("sheet")
+
+    class FakeEnrichment:
+        def __init__(self, *_args):
+            pass
+
+        def enrich(self, _company, **_kwargs):
+            calls.append("enrich")
+
+    with Session(engine) as session:
+        direction = Direction(name="Сбор", slug="collection", sheet_tab="Сбор", email_enrichment_enabled=True)
+        company = Company(source="yandex_maps", company_name="Кейтеринг", normalized_name="кейтеринг", raw_data={})
+        session.add_all([direction, company]); session.flush()
+        run = DirectionRun(direction_id=direction.id, limit_new=1, inserted=1, started_at=datetime.now(timezone.utc))
+        session.add_all([run, CompanyDirection(company_id=company.id, direction_id=direction.id,
+                                               created_at=run.started_at)])
+        session.commit()
+        monkeypatch.setattr("app.services.direction_pipeline.execute_direction", lambda *_args: run)
+        monkeypatch.setattr("app.services.direction_pipeline.CompanyEnrichmentService", FakeEnrichment)
+        monkeypatch.setattr("app.services.direction_pipeline.active_sheets_config", lambda *_args: object())
+        monkeypatch.setattr("app.services.direction_pipeline.GoogleSheetsSyncService", FakeSync)
+
+        execute_direction_pipeline(session, direction, Settings(_env_file=None))
+
+    assert calls == ["sheet", "enrich", "sheet"]

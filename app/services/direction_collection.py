@@ -107,6 +107,10 @@ def execute_direction(
     saved_locations = list(session.scalars(select(DirectionLocation).where(
         DirectionLocation.direction_id == direction.id, DirectionLocation.active.is_(True),
     ).order_by(DirectionLocation.city)))
+    # Search explicitly requested cities before expanding the surrounding
+    # region. A large region must not consume most of a daily run before the
+    # main city is reached.
+    saved_locations.sort(key=lambda location: location.scope == "region")
     locations = expand_locations(saved_locations)
     queries = list(session.scalars(select(DirectionSearchQuery).where(
         DirectionSearchQuery.direction_id == direction.id, DirectionSearchQuery.active.is_(True),
