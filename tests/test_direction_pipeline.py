@@ -56,7 +56,7 @@ def test_one_broken_website_does_not_stop_direction_enrichment(monkeypatch) -> N
 
         execute_direction_pipeline(session, direction, Settings(_env_file=None))
 
-    assert calls == ["Сломанный сайт", "Рабочий сайт"]
+    assert calls == ["Сломанный сайт", "Рабочий сайт", "Сломанный сайт", "Рабочий сайт"]
 
 
 def test_collected_rows_sync_before_slow_enrichment(monkeypatch) -> None:
@@ -75,11 +75,12 @@ def test_collected_rows_sync_before_slow_enrichment(monkeypatch) -> None:
         def __init__(self, *_args):
             pass
 
-        def enrich(self, _company, **_kwargs):
-            calls.append("enrich")
+        def enrich(self, _company, **kwargs):
+            calls.append("ai" if kwargs["use_ai"] else "quick")
 
     with Session(engine) as session:
-        direction = Direction(name="Сбор", slug="collection", sheet_tab="Сбор", email_enrichment_enabled=True)
+        direction = Direction(name="Сбор", slug="collection", sheet_tab="Сбор",
+                              email_enrichment_enabled=True, ai_enrichment_enabled=True)
         company = Company(source="yandex_maps", company_name="Кейтеринг", normalized_name="кейтеринг", raw_data={})
         session.add_all([direction, company]); session.flush()
         run = DirectionRun(direction_id=direction.id, limit_new=1, inserted=1, started_at=datetime.now(timezone.utc))
@@ -93,4 +94,4 @@ def test_collected_rows_sync_before_slow_enrichment(monkeypatch) -> None:
 
         execute_direction_pipeline(session, direction, Settings(_env_file=None))
 
-    assert calls == ["sheet", "enrich", "sheet"]
+    assert calls == ["quick", "sheet", "ai", "sheet"]

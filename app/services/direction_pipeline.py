@@ -19,11 +19,7 @@ def execute_direction_pipeline(
     session: Session, direction: Direction, settings: Settings, run: DirectionRun | None = None,
 ) -> DirectionRun:
     run = execute_direction(session, direction, settings, run)
-    config = active_sheets_config(session, settings)
-    if config:
-        # Publish collected rows while website analysis is still pending. A
-        # slow AI provider must not hide a successful collection from managers.
-        GoogleSheetsSyncService(session, config).sync_direction(direction)
+    companies = []
     if direction.email_enrichment_enabled or direction.ai_enrichment_enabled:
         companies = list(session.scalars(
             select(Company).join(CompanyDirection).where(
@@ -34,12 +30,23 @@ def execute_direction_pipeline(
         service = CompanyEnrichmentService(session, settings)
         for company in companies:
             try:
-                service.enrich(company, use_ai=direction.ai_enrichment_enabled)
+                service.enrich(company, use_ai=False)
             except Exception:
                 # One malformed or unavailable website must not prevent every
                 # other newly collected company from being enriched.
                 session.rollback()
                 logger.exception("Company enrichment failed for %s", company.id)
-    if config and (direction.email_enrichment_enabled or direction.ai_enrichment_enabled):
+    config = active_sheets_config(session, settings)
+    if config:
+        # Publish all contact emails before any slow AI calls.
         GoogleSheetsSyncService(session, config).sync_direction(direction)
+    if direction.ai_enrichment_enabled:
+        for company in companies:
+            try:
+                service.enrich(company, use_ai=True)
+            except Exception:
+                session.rollback()
+                logger.exception("Company AI enrichment failed for %s", company.id)
+        if config:
+            GoogleSheetsSyncService(session, config).sync_direction(direction)
     return run
