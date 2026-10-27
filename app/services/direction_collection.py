@@ -207,7 +207,12 @@ def execute_direction(
                 _source_record(session, result.company.id, lead, query.query, location.city)
                 if lead.source_external_id:
                     known_source_ids.add((source.source, lead.source_external_id))
-                if result.inserted:
+                already_linked = session.scalar(select(CompanyDirection.id).where(
+                    CompanyDirection.company_id == result.company.id,
+                    CompanyDirection.direction_id == direction.id,
+                ))
+                newly_linked = not bool(already_linked)
+                if newly_linked:
                     session.add(CompanyDirection(company_id=result.company.id, direction_id=direction.id))
                     run.inserted += 1
                 else:
@@ -216,7 +221,7 @@ def execute_direction(
                     run_id=run.id, direction_id=direction.id, company_id=result.company.id,
                     source=lead.source, query=query.query, city=location.city,
                     source_external_id=lead.source_external_id, source_url=lead.source_url,
-                    is_new=result.inserted, matched_by=result.matched_by,
+                    is_new=newly_linked, matched_by=result.matched_by,
                     has_phone=bool(lead.phone), has_email=bool(lead.email),
                     has_website=bool(lead.website), has_branches_count=lead.branches_count is not None,
                     duration_ms=int((time.monotonic() - combo_started) * 1000),

@@ -35,7 +35,15 @@ def website_domain(value: str | None) -> str | None:
     if "://" not in candidate:
         candidate = "https://" + candidate
     host = (urlsplit(candidate).hostname or "").casefold().rstrip(".")
-    return host[4:] if host.startswith("www.") else (host or None)
+    host = host[4:] if host.startswith("www.") else host
+    if not host:
+        return None
+    # Several businesses can publish different pages on one shared host.
+    # Keep their profile path in the identity used for deduplication.
+    if host in {"taplink.cc", "taplink.ws", "azimuthotels.com"}:
+        path = urlsplit(candidate).path.strip("/").casefold()
+        return f"{host}/{path}"[:255] if path else None
+    return host
 
 
 def normalize_website(value: str | None) -> str | None:

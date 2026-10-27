@@ -146,7 +146,7 @@ def test_direction_limit_is_shared_and_repeat_finds_next(monkeypatch) -> None:
         assert session.query(CompanyFieldProvenance).filter_by(field="branches_count").count() >= 1
 
 
-def test_existing_company_in_global_database_is_not_counted_as_new(monkeypatch) -> None:
+def test_existing_company_in_global_database_is_added_to_new_direction(monkeypatch) -> None:
     class ExistingAdapter(SourceAdapter):
         name = "yandex_maps"
         def collect(self, spec):
@@ -176,11 +176,11 @@ def test_existing_company_in_global_database_is_not_counted_as_new(monkeypatch) 
 
         run = execute_direction(session, direction, Settings(database_url="sqlite+pysqlite:///:memory:"))
 
-        assert run.inserted == 0
-        assert run.duplicates == 1
+        assert run.inserted == 1
+        assert run.duplicates == 0
         assert session.query(Company).count() == 1
-        assert session.query(CompanyDirection).filter_by(direction_id=direction.id).count() == 0
-        assert session.scalar(select(SearchObservation).where(SearchObservation.direction_id == direction.id)).is_new is False
+        assert session.query(CompanyDirection).filter_by(direction_id=direction.id).count() == 1
+        assert session.scalar(select(SearchObservation).where(SearchObservation.direction_id == direction.id)).is_new is True
 
 
 def test_daily_cursor_continues_deeper_in_same_result_list(monkeypatch) -> None:

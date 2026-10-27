@@ -76,3 +76,19 @@ def test_source_identity_does_not_copy_a_domain_owned_by_another_company() -> No
         session.flush()
         assert result.company.id == source_company.id
         assert source_company.website is None
+
+
+def test_distinct_profiles_on_shared_website_are_separate_companies() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        first = upsert_lead(session, CompanyLead(
+            source="yandex_maps", source_external_id="profile-1", source_url=None,
+            company_name="Первый кейтеринг", website="https://taplink.cc/first_catering",
+        ))
+        second = upsert_lead(session, CompanyLead(
+            source="yandex_maps", source_external_id="profile-2", source_url=None,
+            company_name="Второй кейтеринг", website="https://taplink.cc/second_catering",
+        ))
+        assert first.inserted and second.inserted
+        assert first.company.website_domain != second.company.website_domain
